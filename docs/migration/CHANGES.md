@@ -78,3 +78,35 @@
 
 - 46 个单元测试（`cargo test`）：Go 测试向量逐条翻译（parked core 20%、窗口加权总量、拓扑解析、pmset/ioreg/system_profiler 解析、僵尸聚合、健康评分扣分曲线、磁盘过滤与去重、噪声网卡、代理解析、RingBuffer 环绕序、SI/二进制格式化边界）。
 - 真机冒烟测试（`#[ignore]`）：本机验证 fast/process/full 全链路——16GB 内存读数 82.1%、635 进程、电池 80%/AC/Good、10 核、Top 进程、utun 代理提示均正确。
+
+---
+
+<a name="clean-深度清理"></a>
+## clean 深度清理（子模块 3a：白名单 + 只读预览）
+
+### 对标记录
+
+- 原代码：`bin/clean.sh`（safe_clean 编排）、`lib/core/app_protection.sh`（白名单）、`lib/clean/user.sh`（clean_app_caches 目录）。
+- 本子模块完成：白名单加载/匹配 1:1、`_safe_clean_impl` 的逐路径检查顺序（保护 → 白名单）、Apple 用户缓存族目录（31 条 `safe_clean` 行）、glob 展开（nullglob 语义）、带 deadline 的目录测径、dry-run 预览。
+- 原 `clean_app_caches` 的注释性排除项（Autosave Information、Calendar Cache、壁纸封面缩略图 #1118、E5RT 模型缓存）转化为测试锁定，防止回归。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| 白名单匹配 | bash `[[ == $pattern ]]`（`*` 跨 `/`）+ 父目录保护 + 非 glob 条目子路径保护 | 自实现 fnmatch 匹配器，四条规则逐条移植 | 无行为变更 | 测试锁定：`*` 跨 `/`、`?`、`[a-z]`、`[!a]` |
+| 白名单文件校验 | `//` 拒绝、系统路径拒绝、去重、`~` 展开、用户文件替换默认项 | 相同 | 无行为变更 | `/` 只匹配根路径本身（case 语义），不是全路径前缀 |
+| `safe_clean` 检查顺序 | 存在性 → should_protect_path → whitelist → compiled model cache | 存在性 → 保护前缀 → 白名单 | **部分暂缓** | `should_protect_path` 完整数据（bundle ID 表）与 compiled model cache 检查在 3b 移植 |
+| 删除执行 | `mole_delete`（Trash 路由 + 操作日志） | **未提供**（只有只读预览） | **暂缓** | fail-safe：完整保护层落地前不开放任何删除 |
+| glob 展开 | shell nullglob | 组件级展开 + fnmatch | 无行为变更 | 语义一致 |
+| 目录测径 | `du`-style + timeout | 递归 + 2s deadline，跳过符号链接 | 无行为变更 | 对标 timeout-bounded 约束 |
+
+### 编译/移植问题
+
+- 初版把白名单拒绝规则中的 `/` 实现为路径前缀，会把所有绝对路径误判为系统路径；原 case 语句中 `/` 仅精确匹配根路径。已修正并以测试锁定。
+
+### 测试
+
+- 白名单：glob 语义（跨 `/`、字符类、负类）、父/子方向保护、系统路径拒绝、`//` 与 `~` 处理。
+- clean：glob 展开、测径（含符号链接跳过）、排除项锁定、保护前缀。
+- 真机冒烟（`#[ignore]`）：本机扫描 30 组、83.96 MB 可释放，白名单 default。

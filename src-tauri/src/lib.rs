@@ -1,3 +1,4 @@
+mod clean;
 mod commands;
 mod core;
 mod status;
@@ -38,7 +39,8 @@ pub fn run() {
             format_bytes_bin,
             format_bytes_bin_short,
             format_bytes_bin_compact,
-            commands::status::status_tick
+            commands::status::status_tick,
+            commands::clean::clean_preview
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

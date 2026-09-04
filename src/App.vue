@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import PagePlaceholder from "./components/PagePlaceholder.vue";
 import StatusPage from "./pages/StatusPage.vue";
+import CleanPage from "./pages/CleanPage.vue";
 
 /**
  * 应用外壳：侧边导航 + 模块页面切换。
@@ -38,8 +39,9 @@ const modules: ModuleDef[] = [
     label: "深度清理",
     icon: "🧹",
     origin: "Mole bin/clean.sh + lib/clean/*",
-    status: "模块 3 · 待迁移",
+    status: "模块 3a · 预览版",
     description: "扫描系统、开发工具与浏览器缓存，预览后安全清理。",
+    implemented: true,
   },
   {
     id: "analyze",
@@ -122,6 +124,7 @@ const active = computed(
 
     <main class="content">
       <StatusPage v-if="activeId === 'status'" />
+      <CleanPage v-else-if="activeId === 'clean'" />
       <PagePlaceholder v-else v-bind="active" />
     </main>
   </div>

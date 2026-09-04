@@ -1,5 +1,16 @@
 //! Tauri 命令层：薄封装，业务逻辑在 `status` / `core` 模块。
 
+pub mod clean {
+    use crate::clean::CleanPreview;
+
+    /// 只读清理预览（对标 `MOLE_DRY_RUN=1 ./mole clean`）。
+    /// 删除执行在 3b 子模块（完整保护层 + Trash 路由）落地后开放。
+    #[tauri::command]
+    pub fn clean_preview() -> CleanPreview {
+        crate::clean::scan_preview()
+    }
+}
+
 pub mod status {
     use crate::status::{Collector, MetricsSnapshot};
     use std::sync::Mutex;
