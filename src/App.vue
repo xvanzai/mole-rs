@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import PagePlaceholder from "./components/PagePlaceholder.vue";
+import StatusPage from "./pages/StatusPage.vue";
 
 /**
  * 应用外壳：侧边导航 + 模块页面切换。
@@ -28,8 +29,9 @@ const modules: ModuleDef[] = [
     label: "系统监控",
     icon: "📊",
     origin: "Mole cmd/status/*.go",
-    status: "模块 2 · 待迁移",
+    status: "模块 2 · 已完成",
     description: "实时查看 CPU、内存、磁盘、网络、电池与健康状态（只读）。",
+    implemented: true,
   },
   {
     id: "clean",
@@ -119,7 +121,8 @@ const active = computed(
     </aside>
 
     <main class="content">
-      <PagePlaceholder v-bind="active" />
+      <StatusPage v-if="activeId === 'status'" />
+      <PagePlaceholder v-else v-bind="active" />
     </main>
   </div>
 </template>

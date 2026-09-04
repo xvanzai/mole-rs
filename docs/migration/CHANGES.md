@@ -7,7 +7,8 @@
 
 | 模块 | 原代码 | Rust 代码 | 变更记录 |
 |------|--------|----------|---------|
-| core 工具层 | `internal/units/bytes.go` | `src-tauri/src/core/units.rs` | [§core](#core-工具层) |
+| core 工具层 | `internal/units/bytes.go` | `src-tauri/src/core/units.rs` | [§core 工具层](#core-工具层) |
+| status 系统监控 | `cmd/status/*.go` | `src-tauri/src/status/*` | [§status](#status-系统监控) |
 
 ---
 
@@ -33,3 +34,47 @@
 ### 编译/移植问题
 
 - 无。Go `int64`/`uint64` 与 Rust `i64`/`u64` 语义一致，无溢出风险（SI 展开最大 exp=5，`div` 最大 10^18 < i64::MAX）。
+
+---
+
+<a name="status-系统监控"></a>
+## status 系统监控
+
+### 对标记录
+
+- 原代码：`Mole/cmd/status/`（Go，非测试代码约 3,400 行）。数据源为 gopsutil + macOS 子进程（`sysctl`、`vm_stat`、`memory_pressure`、`diskutil`、`osascript`、`pmset`、`ioreg`、`system_profiler`、`sw_vers`、`ps`、`scutil`、`uptime`）。
+- 快照结构 `MetricsSnapshot` 字段与 JSON 标签 1:1 保留（含 `omitempty`/`json:"-"` 语义）。
+- 缓存分层节奏 1:1 移植：fast（1s）/process（1s）/full（30s）状态机（`watchState`）；硬件 10min、system_profiler 30s、接口 IP 10s、废纸篓 5s、网络速率窗口下限 100ms。
+- 行为细节逐条移植：CPU 两次快照采样与 #1237 墙钟兜底、`kMGTPE`/`>=`/`>` 边界、噪声网卡过滤、Top3 网卡/Top3 磁盘截断、APFS 卷去重键、ps 严格解析与 `ps aux` 回退、僵尸进程父聚合（limit=3）、健康评分全部权重/阈值/文案、pmset/ioreg/system_profiler 三级电池数据合并、CPU 温度刻意不合成的安全约束、C locale 强制（#1267）。
+
+### 变更前后对照
+
+| 项 | 原实现（Go） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| CPU tick 读取 | gopsutil（mach `host_processor_info`） | 直连同一系统调用（libc ABI 声明），tick×0.01s 转换 | 无行为变更 | gopsutil 底层即该接口；秒单位换算后测试向量与 Go 完全一致 |
+| 内存统计 | gopsutil `mem.VirtualMemory()` | 直连 `host_statistics64`；Available = free+inactive+purgeable | 无行为变更 | 同 gopsutil darwin 口径 |
+| 磁盘枚举 | gopsutil `disk.Partitions/Usage`（getfsstat） | 直连 `getfsstat`，过滤/去重/排序规则 1:1 | 无行为变更 | 同一系统调用 |
+| 网络计数 | gopsutil `net.IOCounters`（sysctl NET_RT_IFLIST2） | `getifaddrs` AF_LINK `if_data64`（ifi_ibytes/obytes） | 无行为变更 | 同源内核 64 位计数器 |
+| load average | gopsutil（sysctl vm.loadavg） | `getloadavg`（内核同源算法） | 无行为变更 | 数值等价 |
+| 硬件信息 | gopsutil `host.Info` | `sysctl`（hostname/boottime/osversion）+ 同样子进程解析 | 无行为变更 | — |
+| `collected_at`/`process_collected_at` | RFC3339 字符串 | Unix 秒（f64） | **变更** | 前端 `new Date()` 直接消费；避免引入 chrono，JSON 消费方需按数值解析 |
+| Top-N 进程 | 最小堆（processHeap） | 排序取前 N | 无行为变更 | `processRanksBefore` 为全序，两种实现结果等价 |
+| 并发采集 | goroutine `collectConcurrently` | 顺序采集 | **变更（暂缓）** | 避免引入异步运行时；命令在独立线程执行，fast 路径 <100ms，full 路径最长数秒但仅每 30s 一次；后续可用 `std::thread` 并行化 |
+| GPU 卡片 | `powermetrics`（需 root）+ `system_profiler` | **暂缓**：返回空数组 | **暂缓** | GPU 使用率需 sudo 授权（powermetrics），GUI 下交互路径不同，作为独立子模块跟进 |
+| 蓝牙设备 | `system_profiler SPBluetoothDataType` | **暂缓**：返回空数组 | **暂缓** | 独立子模块跟进 |
+| 磁盘 IO 速率 | gopsutil `disk.IOCounters`（IOKit） | **暂缓**：返回 0 | **暂缓** | 需 IOKit 绑定，独立子模块跟进；健康评分 IO 扣分项相应暂为 0 |
+| APFS purgeable / diskutil SMART / Finder 容量修正 | 三级 fallback（osascript/diskutil） | **暂缓**：raw statfs | **暂缓** | 首版先保证结构与节奏对齐；修正为独立子模块（涉及 osascript 授权） |
+| ProcessWatch 告警 | 进程出现/消失告警状态机 | **暂缓** | **暂缓** | 面向 CLI 长驻 watch 场景；GUI 实时视图本身可见进程，待设计 GUI 告警形态 |
+| TUI 渲染（view.go，1200 行） | Bubble Tea 表格/动画 | Vue 组件（状态卡片 + SVG 迷你图） | **变更（平台差异）** | 终端 TUI → 图形界面为本项目动机本身 |
+
+### 编译/移植问题
+
+1. **`host_statistics64` 返回 KERN_INVALID_ARGUMENT**：初版 flavor 常量记错（26），且 count 必须与内核结构大小精确匹配。经 SDK 宏（`clang -dM`）确认 `HOST_VM_INFO64=4`；`vm_statistics64` 随 macOS 追加演进，count 由 `build.rs` 构建期编译探针计算（等价 gopsutil 的 cgo sizeof 展开）。
+2. **`kern.proc.all` 计数**：返回 `kinfo_proc` 数组而非 PID 数组（首版按 4 字节/进程算出 108864 个进程）；libc crate 未提供该结构，同样由 build.rs 计算 `sizeof(kinfo_proc)`。
+3. **mach tick 单位**：gopsutil `TimesStat` 为秒，原始 tick 需乘 0.01s（ClocksPerSec=100）；未换算前测试向量 20% 失败（得到 100%）。
+4. Go `wg.Go`/`slices`/`strings.Lines` 等新标准库用法在 Rust 中以等价习语改写，无行为影响。
+
+### 测试
+
+- 46 个单元测试（`cargo test`）：Go 测试向量逐条翻译（parked core 20%、窗口加权总量、拓扑解析、pmset/ioreg/system_profiler 解析、僵尸聚合、健康评分扣分曲线、磁盘过滤与去重、噪声网卡、代理解析、RingBuffer 环绕序、SI/二进制格式化边界）。
+- 真机冒烟测试（`#[ignore]`）：本机验证 fast/process/full 全链路——16GB 内存读数 82.1%、635 进程、电池 80%/AC/Good、10 核、Top 进程、utun 代理提示均正确。

@@ -1,5 +1,6 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+mod commands;
 mod core;
+mod status;
 
 use core::units;
 
@@ -31,11 +32,13 @@ fn format_bytes_bin_compact(v: u64) -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .manage(commands::status::CollectorState::default())
         .invoke_handler(tauri::generate_handler![
             format_bytes_si,
             format_bytes_bin,
             format_bytes_bin_short,
-            format_bytes_bin_compact
+            format_bytes_bin_compact,
+            commands::status::status_tick
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
