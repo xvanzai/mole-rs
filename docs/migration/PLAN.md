@@ -20,9 +20,9 @@
 
 | # | 模块 | 原代码位置 | Rust 落点 | UI | 状态 |
 |---|------|-----------|----------|-----|------|
-| 1 | core 工具层（字节单位等） | `internal/units/bytes.go`、`lib/core/*.sh` | `src-tauri/src/core/` | — | 进行中 |
-| 2 | status 系统监控 | `cmd/status/*.go`（metrics_cpu/memory/disk/network/battery/gpu/process/health…） | `src-tauri/src/commands/status.rs` | 监控仪表盘 | 待办 |
-| 3 | clean 深度清理 | `bin/clean.sh`、`lib/clean/{caches,system,user,dev}.sh`、`lib/core/app_protection*.sh` | `src-tauri/src/commands/clean.rs` | 清理页（预览→执行） | 待办 |
+| 1 | core 工具层（字节单位等） | `internal/units/bytes.go` | `src-tauri/src/core/units.rs` | — | ✅ 已完成 |
+| 2 | status 系统监控 | `cmd/status/*.go` | `src-tauri/src/status/` + `src/pages/StatusPage.vue` | 监控仪表盘 | ✅ 已完成（GPU/蓝牙/磁盘IO/APFS修正为后续子项） |
+| 3 | clean 深度清理 | `bin/clean.sh`、`lib/clean/*`、`lib/core/app_protection*.sh` | `src-tauri/src/clean/` + `src/pages/CleanPage.vue` | 清理页（预览→执行） | 🟡 3a 完成（白名单+Apple缓存目录+只读预览）；3b=保护层+Trash删除+日志；3c=其余清理族 |
 | 4 | purge 项目构建产物清理 | `bin/purge.sh`、`lib/clean/project.sh` | `src-tauri/src/commands/purge.rs` | 项目清理页 | 待办 |
 | 5 | analyze 磁盘分析 | `cmd/analyze/*.go`（scanner/heap/insights/delete） | `src-tauri/src/commands/analyze.rs` | 磁盘树图页 | 待办 |
 | 6 | uninstall 应用卸载 | `bin/uninstall.sh`、`lib/uninstall/{batch,brew,steam}.sh` | `src-tauri/src/commands/uninstall.rs` | 卸载页 | 待办 |
