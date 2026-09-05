@@ -10,8 +10,8 @@
 use serde::Serialize;
 use std::path::PathBuf;
 
-/// 默认展示条数（对标 MOLE_HISTORY_DEFAULT_LIMIT）。
-const DEFAULT_LIMIT: usize = 20;
+/// 默认展示条数（对标 MOLE_HISTORY_DEFAULT_LIMIT，命令层缺省值）。
+pub(crate) const DEFAULT_LIMIT: usize = 20;
 
 fn operations_log_file() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();

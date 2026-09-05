@@ -63,6 +63,7 @@ pub fn task_catalog() -> Vec<OptimizeTask> {
 
 /// 任务结果六态（对标 MOLE_OPTIMIZE_OUTCOME_*）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[allow(dead_code)]
 pub enum Outcome {
     Applied,
     Unchanged,

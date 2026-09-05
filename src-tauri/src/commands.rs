@@ -18,7 +18,7 @@ pub mod history {
     /// 操作历史（对标 mo history --json）。
     #[tauri::command]
     pub fn history_list(limit: Option<usize>) -> crate::history::HistoryData {
-        crate::history::load_history(limit.unwrap_or(20))
+        crate::history::load_history(limit.unwrap_or(crate::history::DEFAULT_LIMIT))
     }
 }
 
