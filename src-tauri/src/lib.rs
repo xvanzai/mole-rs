@@ -1,5 +1,6 @@
 mod clean;
 mod commands;
+mod analyze;
 mod core;
 mod purge;
 mod status;
@@ -44,7 +45,10 @@ pub fn run() {
             commands::clean::clean_preview,
             commands::clean::clean_execute,
             commands::purge::purge_scan,
-            commands::purge::purge_execute
+            commands::purge::purge_execute,
+            commands::app::get_home_dir,
+            commands::analyze::analyze_scan,
+            commands::analyze::analyze_delete
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

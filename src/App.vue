@@ -4,6 +4,7 @@ import PagePlaceholder from "./components/PagePlaceholder.vue";
 import StatusPage from "./pages/StatusPage.vue";
 import CleanPage from "./pages/CleanPage.vue";
 import PurgePage from "./pages/PurgePage.vue";
+import AnalyzePage from "./pages/AnalyzePage.vue";
 
 /**
  * 应用外壳：侧边导航 + 模块页面切换。
@@ -49,8 +50,9 @@ const modules: ModuleDef[] = [
     label: "磁盘分析",
     icon: "🔍",
     origin: "Mole cmd/analyze/*.go",
-    status: "模块 5 · 待迁移",
+    status: "模块 5 · 已完成",
     description: "可视化磁盘占用分布，定位大文件与目录。",
+    implemented: true,
   },
   {
     id: "uninstall",
@@ -128,6 +130,7 @@ const active = computed(
       <StatusPage v-if="activeId === 'status'" />
       <CleanPage v-else-if="activeId === 'clean'" />
       <PurgePage v-else-if="activeId === 'purge'" />
+      <AnalyzePage v-else-if="activeId === 'analyze'" />
       <PagePlaceholder v-else v-bind="active" />
     </main>
   </div>

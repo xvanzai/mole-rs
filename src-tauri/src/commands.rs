@@ -1,5 +1,27 @@
 //! Tauri 命令层：薄封装，业务逻辑在 `status` / `core` 模块。
 
+pub mod app {
+    /// 用户主目录（供前端默认扫描路径）。
+    #[tauri::command]
+    pub fn get_home_dir() -> String {
+        std::env::var("HOME").unwrap_or_default()
+    }
+}
+
+pub mod analyze {
+    /// 扫描一个目录（对标 mo analyze 的单层浏览 + 按需下钻）。
+    #[tauri::command]
+    pub fn analyze_scan(path: String) -> Result<crate::analyze::ScanResult, String> {
+        crate::analyze::scan_path(&path)
+    }
+
+    /// 从当前浏览层删除选中条目（仅直接子项，走 Trash 安全删除）。
+    #[tauri::command]
+    pub fn analyze_delete(root: String, selected: Vec<String>, dry_run: bool) -> crate::clean::CleanExecuteResult {
+        crate::analyze::delete_entries(&root, &selected, dry_run)
+    }
+}
+
 pub mod purge {
     use crate::purge::{PurgeScanResult};
 
