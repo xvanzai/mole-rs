@@ -327,3 +327,28 @@
 ### 测试
 
 - 101 个测试通过（新增：三种行格式解析、items/size 提取、无效行、limit 边界）。
+
+---
+
+<a name="optimize-优化维护"></a>
+## optimize 优化维护（模块7第一片：任务目录 + 执行框架 + saved_state_cleanup）
+
+### 对标记录
+
+- 原代码：`lib/optimize/catalog.sh`（21 项任务注册，含 validate 校验）、`lib/optimize/outcomes.sh`（六态结果）、`lib/optimize/tasks.sh`（1,887 行处理器）。
+- 目录 1:1：21 项任务的 action/health_name/description 逐条搬运，顺序一致；`optimize_catalog_validate` 的约束（action 唯一、命名规范、元数据完整）转为测试。
+- 结果语义 1:1：applied/unchanged/skipped/unavailable/attention/failed 六态计数与摘要。
+- `saved_state_cleanup` 处理器 1:1：`~/Library/Saved Application State` 下 `*.savedState` 且 mtime 超 30 天；有界扫描（超时整批放弃，对标 "materialize only completed scans"）；逐项 should_protect_path（复用完整保护层）；删除走统一 Trash + 双日志。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| 其余 20 个处理器 | tasks.sh 各自实现（多数含 sudo/launchctl/mdfind 交互） | 框架就位，执行返回 unavailable，UI 标注"待迁移" | **暂缓** | 每个处理器都是独立系统交互面（DNS flush、SQLite vacuum、LaunchServices 重建等），按计划逐个对标移植后开放，不做行为猜测 |
+| 白名单项过滤（opt_* 对应的 whitelist names） | 按 whitelist name 跳过 | 未接入（保护层已覆盖路径类任务） | **暂缓** | 与其余处理器一起移植 |
+| sudo 类任务授权 | MOLE_TEST_NO_AUTH 体系 | 不适用 | 平台差异 | GUI 场景后续用 macOS 授权 API 评估 |
+
+### 测试
+
+- 104 个测试通过（新增：目录完整性/唯一性/命名规范、implemented 标记一致性、未移植任务 unavailable 语义）。
+- 真机冒烟：本机无 `~/Library/Saved Application State`（macOS 26 惰性创建）→ Unavailable，与原实现 `-d` 分支行为一致。

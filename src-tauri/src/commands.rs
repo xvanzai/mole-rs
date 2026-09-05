@@ -1,5 +1,19 @@
 //! Tauri 命令层：薄封装，业务逻辑在 `status` / `core` 模块。
 
+pub mod optimize {
+    /// 任务目录（对标 catalog.sh 21 项）。
+    #[tauri::command]
+    pub fn optimize_tasks() -> Vec<crate::optimize::OptimizeTask> {
+        crate::optimize::task_catalog()
+    }
+
+    /// 执行选中的优化任务。
+    #[tauri::command]
+    pub fn optimize_execute(selected: Vec<String>, dry_run: bool) -> crate::optimize::OptimizeResult {
+        crate::optimize::execute(&selected, dry_run)
+    }
+}
+
 pub mod history {
     /// 操作历史（对标 mo history --json）。
     #[tauri::command]

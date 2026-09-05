@@ -3,6 +3,7 @@ mod commands;
 mod analyze;
 mod core;
 mod history;
+mod optimize;
 mod purge;
 mod status;
 mod uninstall;
@@ -51,6 +52,8 @@ pub fn run() {
             commands::app::get_home_dir,
             commands::uninstall::uninstall_list_apps,
             commands::history::history_list,
+            commands::optimize::optimize_tasks,
+            commands::optimize::optimize_execute,
             commands::analyze::analyze_scan,
             commands::analyze::analyze_delete
         ])

@@ -7,6 +7,7 @@ import PurgePage from "./pages/PurgePage.vue";
 import AnalyzePage from "./pages/AnalyzePage.vue";
 import UninstallPage from "./pages/UninstallPage.vue";
 import HistoryPage from "./pages/HistoryPage.vue";
+import OptimizePage from "./pages/OptimizePage.vue";
 
 /**
  * 应用外壳：侧边导航 + 模块页面切换。
@@ -70,8 +71,9 @@ const modules: ModuleDef[] = [
     label: "优化维护",
     icon: "⚡️",
     origin: "Mole bin/optimize.sh + lib/optimize/*",
-    status: "模块 7 · 待迁移",
+    status: "模块 7a · 框架版",
     description: "刷新系统缓存与服务等有界维护任务。",
+    implemented: true,
   },
   {
     id: "purge",
@@ -137,6 +139,7 @@ const active = computed(
       <AnalyzePage v-else-if="activeId === 'analyze'" />
       <UninstallPage v-else-if="activeId === 'uninstall'" />
       <HistoryPage v-else-if="activeId === 'history'" />
+      <OptimizePage v-else-if="activeId === 'optimize'" />
       <PagePlaceholder v-else v-bind="active" />
     </main>
   </div>
