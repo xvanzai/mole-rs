@@ -22,7 +22,7 @@
 |---|------|-----------|----------|-----|------|
 | 1 | core 工具层（字节单位等） | `internal/units/bytes.go` | `src-tauri/src/core/units.rs` | — | ✅ 已完成 |
 | 2 | status 系统监控 | `cmd/status/*.go` | `src-tauri/src/status/` + `src/pages/StatusPage.vue` | 监控仪表盘 | ✅ 已完成（GPU/蓝牙/磁盘IO/APFS修正为后续子项） |
-| 3 | clean 深度清理 | `bin/clean.sh`、`lib/clean/*`、`lib/core/app_protection*.sh` | `src-tauri/src/clean/` + `src/pages/CleanPage.vue` | 清理页（预览→执行） | 🟡 3a 完成（白名单+Apple缓存目录+只读预览）；3b=保护层+Trash删除+日志；3c=其余清理族 |
+| 3 | clean 深度清理 | `bin/clean.sh`、`lib/clean/*`、`lib/core/app_protection*.sh` | `src-tauri/src/clean/` + `src/pages/CleanPage.vue` | 清理页（预览→执行） | 🟢 3a+3b 完成（白名单、完整保护层、Trash 安全删除、双日志、执行 UI）；3c=其余清理族（system/dev/browser/hints） |
 | 4 | purge 项目构建产物清理 | `bin/purge.sh`、`lib/clean/project.sh` | `src-tauri/src/commands/purge.rs` | 项目清理页 | 待办 |
 | 5 | analyze 磁盘分析 | `cmd/analyze/*.go`（scanner/heap/insights/delete） | `src-tauri/src/commands/analyze.rs` | 磁盘树图页 | 待办 |
 | 6 | uninstall 应用卸载 | `bin/uninstall.sh`、`lib/uninstall/{batch,brew,steam}.sh` | `src-tauri/src/commands/uninstall.rs` | 卸载页 | 待办 |
