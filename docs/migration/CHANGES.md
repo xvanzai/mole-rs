@@ -304,3 +304,26 @@
 
 - 98 个测试通过（新增：bundle ID 清洗、保护分级含锚定反例、搜索目录覆盖）。
 - 真机冒烟：42 个应用、bundle ID 与保护标记正确（GarageBand 归为 Apple 可卸载、系统 App 标 🛡）。
+
+---
+
+<a name="history-历史记录"></a>
+## history 历史记录（模块8第一片）
+
+### 对标记录
+
+- 原代码：`bin/history.sh` + `lib/core/history.sh`（564 行）。
+- operations.log 解析 1:1：会话开始/结束标记行、`[ts] [cmd] ACTION path (detail)` 操作行按 action 聚合（removed/trashed/skipped/failed/rebuilt/other）；未终止会话读取时闭合（对标 history_finish_session）；limit 1-200 取最近 N 条并倒序输出（对标 history_normalize_limit + 渲染顺序）。
+- deletions.log TSV 解析 1:1（五列，空行与短行跳过）。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| 会话归属 | 全局状态机逐行解析 | 最近同名未闭合会话归属 | 无行为变更 | shell 日志为单写者追加，语义一致 |
+| `mo history` 文本渲染 | 终端表格 | Vue 会话卡片 + 取证表 | 平台差异 | TUI → GUI |
+| 无效行处理 | 静默跳过 | 相同 | 无行为变更 | — |
+
+### 测试
+
+- 101 个测试通过（新增：三种行格式解析、items/size 提取、无效行、limit 边界）。

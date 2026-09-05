@@ -27,7 +27,7 @@
 | 5 | analyze 磁盘分析 | `cmd/analyze/*.go` | `src-tauri/src/analyze/` + `src/pages/AnalyzePage.vue` | 磁盘浏览页 | ✅ 第一片完成（扫描器容量语义+浏览+删除）；缓存层/Spotlight预热/快照对比暂缓 |
 | 6 | uninstall 应用卸载 | `bin/uninstall.sh` + `lib/uninstall/*` | `src-tauri/src/uninstall/` + `src/pages/UninstallPage.vue` | 卸载页 | 🟡 6a 完成（只读清单+保护分级）；6b=应用删除+find_app_files 残留查找（逐行复核） |
 | 7 | optimize 优化维护 | `bin/optimize.sh`、`lib/optimize/*.sh` | `src-tauri/src/commands/optimize.rs` | 优化页 | 待办 |
-| 8 | history / manage（更新、白名单、自移除） | `bin/history.sh`、`lib/core/history.sh`、`lib/manage/*.sh` | `src-tauri/src/commands/{history,manage}.rs` | 历史页 / 设置页 | 待办 |
+| 8 | history / manage（更新、白名单、自移除） | `bin/history.sh` + `lib/core/history.sh` + `lib/manage/*` | `src-tauri/src/history.rs` + `src/pages/HistoryPage.vue` | 历史页 / 设置页 | 🟡 8a 完成（历史）；白名单管理 UI 待做 |
 
 > 顺序理由：core 是公共底座；status 只读、风险最低，先打通「Rust 命令 + 实时 UI」管线；clean 是旗舰功能；purge 与 clean 共享 project.sh 逻辑；analyze/uninstall/optimize 依次跟进；history/manage 依赖前序模块产生的数据。
 

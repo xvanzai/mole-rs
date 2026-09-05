@@ -2,6 +2,7 @@ mod clean;
 mod commands;
 mod analyze;
 mod core;
+mod history;
 mod purge;
 mod status;
 mod uninstall;
@@ -49,6 +50,7 @@ pub fn run() {
             commands::purge::purge_execute,
             commands::app::get_home_dir,
             commands::uninstall::uninstall_list_apps,
+            commands::history::history_list,
             commands::analyze::analyze_scan,
             commands::analyze::analyze_delete
         ])

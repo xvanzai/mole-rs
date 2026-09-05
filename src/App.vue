@@ -6,6 +6,7 @@ import CleanPage from "./pages/CleanPage.vue";
 import PurgePage from "./pages/PurgePage.vue";
 import AnalyzePage from "./pages/AnalyzePage.vue";
 import UninstallPage from "./pages/UninstallPage.vue";
+import HistoryPage from "./pages/HistoryPage.vue";
 
 /**
  * 应用外壳：侧边导航 + 模块页面切换。
@@ -86,8 +87,9 @@ const modules: ModuleDef[] = [
     label: "历史记录",
     icon: "🕘",
     origin: "Mole bin/history.sh + lib/core/history.sh",
-    status: "模块 8 · 待迁移",
+    status: "模块 8a · 已完成",
     description: "查看清理与卸载操作日志。",
+    implemented: true,
   },
   {
     id: "settings",
@@ -134,6 +136,7 @@ const active = computed(
       <PurgePage v-else-if="activeId === 'purge'" />
       <AnalyzePage v-else-if="activeId === 'analyze'" />
       <UninstallPage v-else-if="activeId === 'uninstall'" />
+      <HistoryPage v-else-if="activeId === 'history'" />
       <PagePlaceholder v-else v-bind="active" />
     </main>
   </div>
