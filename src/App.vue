@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, markRaw, ref, type Component } from "vue";
 import PagePlaceholder from "./components/PagePlaceholder.vue";
 import ConfirmDialog from "./components/ConfirmDialog.vue";
 import StatusPage from "./pages/StatusPage.vue";
@@ -15,6 +15,10 @@ import OptimizePage from "./pages/OptimizePage.vue";
  *
  * 模块划分对标 Mole CLI 子命令（见 docs/migration/PLAN.md §3），
  * 各页面按迁移顺序逐个实现，先以占位页呈现。
+ *
+ * 页面用 <KeepAlive> 缓存：切走标签页不丢失扫描状态/结果——后端命令
+ * 在后台线程继续执行，回到页面即见结果（此前 v-if 直接卸载组件，
+ * 切页即中断展示且返回时从头重扫）。
  */
 
 interface ModuleDef {
@@ -26,8 +30,8 @@ interface ModuleDef {
   /** 迁移状态文案 */
   status: string;
   description: string;
-  /** 是否已实现（已实现模块将替换占位组件） */
-  implemented?: boolean;
+  /** 已实现模块的页面组件（markRaw 避免响应式包装） */
+  component?: Component;
 }
 
 const modules: ModuleDef[] = [
@@ -38,7 +42,7 @@ const modules: ModuleDef[] = [
     origin: "Mole cmd/status/*.go",
     status: "模块 2 · 已完成",
     description: "实时查看 CPU、内存、磁盘、网络、电池与健康状态（只读）。",
-    implemented: true,
+    component: markRaw(StatusPage),
   },
   {
     id: "clean",
@@ -47,7 +51,7 @@ const modules: ModuleDef[] = [
     origin: "Mole bin/clean.sh + lib/clean/*",
     status: "模块 3a · 预览版",
     description: "扫描系统、开发工具与浏览器缓存，预览后安全清理。",
-    implemented: true,
+    component: markRaw(CleanPage),
   },
   {
     id: "analyze",
@@ -56,7 +60,7 @@ const modules: ModuleDef[] = [
     origin: "Mole cmd/analyze/*.go",
     status: "模块 5 · 已完成",
     description: "可视化磁盘占用分布，定位大文件与目录。",
-    implemented: true,
+    component: markRaw(AnalyzePage),
   },
   {
     id: "uninstall",
@@ -65,7 +69,7 @@ const modules: ModuleDef[] = [
     origin: "Mole bin/uninstall.sh + lib/uninstall/*",
     status: "模块 6a · 清单版",
     description: "卸载应用及其残留（启动项、偏好设置、隐藏文件）。",
-    implemented: true,
+    component: markRaw(UninstallPage),
   },
   {
     id: "optimize",
@@ -74,7 +78,7 @@ const modules: ModuleDef[] = [
     origin: "Mole bin/optimize.sh + lib/optimize/*",
     status: "模块 7a · 框架版",
     description: "刷新系统缓存与服务等有界维护任务。",
-    implemented: true,
+    component: markRaw(OptimizePage),
   },
   {
     id: "purge",
@@ -83,7 +87,7 @@ const modules: ModuleDef[] = [
     origin: "Mole bin/purge.sh + lib/clean/project.sh",
     status: "模块 4 · 已完成",
     description: "清理项目构建产物（node_modules、target、DerivedData 等）。",
-    implemented: true,
+    component: markRaw(PurgePage),
   },
   {
     id: "history",
@@ -92,7 +96,7 @@ const modules: ModuleDef[] = [
     origin: "Mole bin/history.sh + lib/core/history.sh",
     status: "模块 8a · 已完成",
     description: "查看清理与卸载操作日志。",
-    implemented: true,
+    component: markRaw(HistoryPage),
   },
   {
     id: "settings",
@@ -107,6 +111,10 @@ const modules: ModuleDef[] = [
 const activeId = ref("status");
 const active = computed(
   () => modules.find((m) => m.id === activeId.value) ?? modules[0],
+);
+const activeComponent = computed(() => active.value.component ?? PagePlaceholder);
+const activeProps = computed(() =>
+  active.value.component ? {} : active.value,
 );
 </script>
 
@@ -127,21 +135,16 @@ const active = computed(
         >
           <span class="icon">{{ m.icon }}</span>
           <span class="label">{{ m.label }}</span>
-          <span v-if="!m.implemented" class="dot" title="迁移中" />
+          <span v-if="!m.component" class="dot" title="迁移中" />
         </button>
       </nav>
       <footer class="sidebar-foot">对标 tw93/mole · GPL-3.0</footer>
     </aside>
 
     <main class="content">
-      <StatusPage v-if="activeId === 'status'" />
-      <CleanPage v-else-if="activeId === 'clean'" />
-      <PurgePage v-else-if="activeId === 'purge'" />
-      <AnalyzePage v-else-if="activeId === 'analyze'" />
-      <UninstallPage v-else-if="activeId === 'uninstall'" />
-      <HistoryPage v-else-if="activeId === 'history'" />
-      <OptimizePage v-else-if="activeId === 'optimize'" />
-      <PagePlaceholder v-else v-bind="active" />
+      <KeepAlive>
+        <component :is="activeComponent" v-bind="activeProps" :key="activeId" />
+      </KeepAlive>
     </main>
     <ConfirmDialog />
   </div>

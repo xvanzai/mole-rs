@@ -6,7 +6,7 @@
  * DerivedData 等），按项目分组；仅 7 天无活动的产物进入默认选择
  * （对标 classify_purge_activity，fail-closed）；删除走回收站（可恢复）。
  */
-import { computed, onMounted, ref } from "vue";
+import { computed, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { confirm } from "../composables/confirm";
 
@@ -39,10 +39,12 @@ interface ExecuteResult {
 }
 
 const scan = ref<PurgeScanResult | null>(null);
-const loading = ref(true);
+const loading = ref(false);
 const error = ref("");
 const executing = ref(false);
 const result = ref<ExecuteResult | null>(null);
+/** 是否已开始（不自动扫描，由用户显式触发）。 */
+const started = ref(false);
 /** 选中的产物路径（仅 old 活动）。 */
 const selected = ref<Set<string>>(new Set());
 const expanded = ref<string | null>(null);
@@ -64,7 +66,12 @@ async function load() {
     loading.value = false;
   }
 }
-onMounted(load);
+
+/** 开始：项目产物只读扫描（对标 `mo purge --dry-run`）。 */
+async function startScan() {
+  started.value = true;
+  await load();
+}
 
 async function execute() {
   if (!selected.value.size) return;
@@ -142,6 +149,18 @@ function shortPath(p: string): string {
         {{ executing ? "清理中…" : `清理选中（${selected.size}）` }}
       </button>
     </header>
+
+    <div v-if="!started && !loading && !scan" class="idle">
+      <p class="idle-icon">🗑️</p>
+      <h3>项目清理</h3>
+      <p class="sub">
+        扫描搜索根下的项目构建产物（node_modules、target、DerivedData
+        等，对标 <code>mo purge</code>）。仅 7 天无活动的产物进入默认选择。
+      </p>
+      <button class="start" :disabled="loading" @click="startScan">
+        开始扫描
+      </button>
+    </div>
 
     <p v-if="error" class="error">{{ error }}</p>
 
@@ -347,5 +366,44 @@ function shortPath(p: string): string {
 .empty {
   text-align: center;
   padding: 32px 0;
+}
+
+.idle {
+  text-align: center;
+  padding: 72px 24px;
+  background: var(--surface);
+  border: 1px dashed var(--border);
+  border-radius: 14px;
+}
+
+.idle-icon {
+  font-size: 34px;
+  margin: 0 0 8px;
+}
+
+.idle h3 {
+  margin: 0 0 6px;
+  font-size: 16px;
+}
+
+.idle .sub {
+  max-width: 460px;
+  margin: 0 auto 18px;
+}
+
+.start {
+  padding: 9px 26px;
+  border: none;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.start:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 </style>

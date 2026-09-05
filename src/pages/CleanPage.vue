@@ -6,7 +6,7 @@
  * 模块3b（完整 should_protect_path 保护层 + Trash 路由 + 操作日志）
  * 落地后开放——安全契约：不可预览的删除不存在。
  */
-import { computed, onMounted, ref } from "vue";
+import { computed, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { confirm } from "../composables/confirm";
 
@@ -29,8 +29,10 @@ interface CleanPreview {
 }
 
 const preview = ref<CleanPreview | null>(null);
-const loading = ref(true);
+const loading = ref(false);
 const error = ref("");
+/** 是否已开始（不自动扫描，由用户显式触发）。 */
+const started = ref(false);
 /** 选中的组描述（对标勾选清理项）；默认全选有可释放空间的组。 */
 const selected = ref<Set<string>>(new Set());
 const executing = ref(false);
@@ -67,7 +69,12 @@ async function load() {
     loading.value = false;
   }
 }
-onMounted(load);
+
+/** 开始：只读预览扫描（对标 `MOLE_DRY_RUN=1 ./mole clean`）。 */
+async function startScan() {
+  started.value = true;
+  await load();
+}
 
 /** 执行清理：确认对话框 → 后端重扫 + sink 复检 + Trash 删除。 */
 async function execute() {
@@ -152,6 +159,19 @@ function mb(bytes: number): string {
       {{ mb(result.freed_bytes) }}
       <template v-if="result.failed_count">，失败 {{ result.failed_count }} 项</template>。
       日志见 <code>~/Library/Logs/mole/operations.log</code>。
+    </div>
+
+    <div v-if="!started && !loading && !preview" class="idle">
+      <p class="idle-icon">🧹</p>
+      <h3>深度清理</h3>
+      <p class="sub">
+        扫描 Apple 系统缓存族与开发工具链缓存（对标
+        <code>clean_app_caches</code>），预览确认后统一移入废纸篓。
+        扫描只读，不会删除任何文件。
+      </p>
+      <button class="start" :disabled="loading" @click="startScan">
+        开始扫描
+      </button>
     </div>
 
     <p v-if="error" class="error">{{ error }}</p>
@@ -361,5 +381,44 @@ function mb(bytes: number): string {
 .empty {
   text-align: center;
   padding: 32px 0;
+}
+
+.idle {
+  text-align: center;
+  padding: 72px 24px;
+  background: var(--surface);
+  border: 1px dashed var(--border);
+  border-radius: 14px;
+}
+
+.idle-icon {
+  font-size: 34px;
+  margin: 0 0 8px;
+}
+
+.idle h3 {
+  margin: 0 0 6px;
+  font-size: 16px;
+}
+
+.idle .sub {
+  max-width: 460px;
+  margin: 0 auto 18px;
+}
+
+.start {
+  padding: 9px 26px;
+  border: none;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.start:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 </style>

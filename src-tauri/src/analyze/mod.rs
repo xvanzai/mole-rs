@@ -12,14 +12,19 @@
 //! 超时标记 truncated——结果仅用于展示，删除判定不依赖大小。
 
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 /// 扫描总预算（对标 duTimeout = 30s）。
 const SCAN_DEADLINE: Duration = Duration::from_secs(30);
 /// 大文件保留数（对标 maxLargeFiles）。
 const MAX_LARGE_FILES: usize = 20;
+/// 并行遍历线程数上限（对标 Go calculateDirSizeConcurrent 的并发设计；
+/// 文件系统遍历是 IO 密集，超过 8 收益递减）。
+const MAX_WALKERS: usize = 8;
 
 /// 目录条目（对标 dirEntry；last_access 为 Unix 毫秒）。
 #[derive(Debug, Clone, Serialize)]
@@ -52,16 +57,15 @@ pub struct ScanResult {
     pub truncated: bool,
 }
 
-/// 扫描内共享的容量记账状态（对标 countableFileSize 的 seen map 与计数器）。
+/// 扫描内共享的容量记账状态（对标 countableFileSize 的 seen map 与 Top 堆；
+/// 多 worker 共享，经互斥锁短暂持锁更新）。
 struct ScanState {
     seen_inodes: HashSet<(u64, u64)>,
     large: std::collections::BinaryHeap<std::cmp::Reverse<(u64, PathBuf, String)>>,
-    deadline: Instant,
-    truncated: bool,
 }
 
 impl ScanState {
-    /// 记录文件大小：硬链接去重 + Top-20 大文件堆。
+    /// 记录文件大小：硬链接去重 + Top-20 大文件堆。返回计入的大小。
     fn count_file(&mut self, path: &Path, name: &str, meta: &std::fs::Metadata) -> u64 {
         use std::os::unix::fs::MetadataExt;
         let size = meta.len().min(meta.blocks() * 512);
@@ -85,35 +89,148 @@ impl ScanState {
     }
 }
 
-/// 递归计算目录大小（对标 calculateDirSizeConcurrent 的容量语义）。
-fn dir_size(dir: &Path, state: &mut ScanState, total_files: &mut u64, total_dirs: &mut u64) -> u64 {
-    if Instant::now() >= state.deadline {
-        state.truncated = true;
-        return 0;
+/// 并行目录遍历器（对标 calculateDirSizeConcurrent 的并发语义）：
+/// 共享任务队列 + 有界 worker；队列元素携带其所属顶层条目的桶号，
+/// 文件大小按桶归集，从而得到每个顶层条目的递归大小。
+/// 终止条件：pending（已入队+在飞目录数）归零；deadline 触发 stop 后
+/// worker 立即排空退出（结果标记 truncated，仅展示用）。
+struct ParallelWalker {
+    queue: Mutex<VecDeque<(PathBuf, usize)>>,
+    idle: Condvar,
+    pending: AtomicUsize,
+    stop: AtomicBool,
+    state: Mutex<ScanState>,
+    total_files: AtomicU64,
+    total_dirs: AtomicU64,
+    total_size: AtomicU64,
+    buckets: Vec<AtomicU64>,
+    deadline: Instant,
+}
+
+impl ParallelWalker {
+    fn new(buckets: usize, deadline: Instant) -> Self {
+        Self {
+            queue: Mutex::new(VecDeque::new()),
+            idle: Condvar::new(),
+            pending: AtomicUsize::new(0),
+            stop: AtomicBool::new(false),
+            state: Mutex::new(ScanState {
+                seen_inodes: HashSet::new(),
+                large: std::collections::BinaryHeap::new(),
+            }),
+            total_files: AtomicU64::new(0),
+            total_dirs: AtomicU64::new(0),
+            total_size: AtomicU64::new(0),
+            buckets: (0..buckets).map(|_| AtomicU64::new(0)).collect(),
+            deadline,
+        }
     }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0; // 权限等错误：跳过（对标扫描对错误的容忍）
-    };
-    let mut total = 0u64;
-    for entry in entries.flatten() {
-        if Instant::now() >= state.deadline {
-            state.truncated = true;
-            return total;
+
+    /// 目录入队（对标「发现即计数」：不可读目录同样计入 total_dirs）。
+    fn push_dir(&self, path: PathBuf, bucket: usize) {
+        self.total_dirs.fetch_add(1, Ordering::Relaxed);
+        self.pending.fetch_add(1, Ordering::SeqCst);
+        self.queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push_back((path, bucket));
+        self.idle.notify_one();
+    }
+
+    /// 记录文件大小：硬链接去重 + Top-20 大文件堆。返回计入的大小。
+    fn count_file(&self, path: &Path, name: &str, meta: &std::fs::Metadata, bucket: Option<usize>) -> u64 {
+        let size = {
+            let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            st.count_file(path, name, meta)
+        };
+        if size > 0 {
+            if let Some(b) = bucket {
+                self.buckets[b].fetch_add(size, Ordering::Relaxed);
+            }
+            self.total_size.fetch_add(size, Ordering::Relaxed);
         }
-        let Ok(ft) = entry.file_type() else { continue };
-        if ft.is_symlink() {
-            continue; // 符号链接不计大小
+        self.total_files.fetch_add(1, Ordering::Relaxed);
+        size
+    }
+
+    /// 遍历一个目录：文件计数，子目录入队（继承桶号）。
+    fn walk_dir(&self, dir: &Path, bucket: usize) {
+        if self.stop.load(Ordering::Relaxed) || Instant::now() >= self.deadline {
+            self.stop.store(true, Ordering::Relaxed);
+            return;
         }
-        let path = entry.path();
-        if ft.is_dir() {
-            *total_dirs += 1;
-            total += dir_size(&path, state, total_files, total_dirs);
-        } else if let Ok(meta) = entry.metadata() {
-            *total_files += 1;
-            total += state.count_file(&path, &entry.file_name().to_string_lossy(), &meta);
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return; // 权限等错误：跳过（对标扫描对错误的容忍）
+        };
+        let mut subdirs: Vec<(PathBuf, usize)> = Vec::new();
+        for entry in entries.flatten() {
+            if Instant::now() >= self.deadline {
+                self.stop.store(true, Ordering::Relaxed);
+                break;
+            }
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_symlink() {
+                continue; // 符号链接不计大小
+            }
+            let path = entry.path();
+            if ft.is_dir() {
+                subdirs.push((path, bucket));
+            } else if let Ok(meta) = entry.metadata() {
+                self.count_file(
+                    &path,
+                    &entry.file_name().to_string_lossy(),
+                    &meta,
+                    Some(bucket),
+                );
+            }
+        }
+        for (d, b) in subdirs {
+            if self.stop.load(Ordering::Relaxed) {
+                break;
+            }
+            self.push_dir(d, b);
         }
     }
-    total
+
+    /// worker 主循环：取目录 → 遍历 → pending 归零时全体退出。
+    fn worker(&self) {
+        let mut q = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+        loop {
+            if self.stop.load(Ordering::Relaxed) {
+                return;
+            }
+            if let Some((dir, bucket)) = q.pop_front() {
+                drop(q);
+                self.walk_dir(&dir, bucket);
+                if self.pending.fetch_sub(1, Ordering::SeqCst) == 1 {
+                    self.idle.notify_all();
+                }
+                q = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+            } else if self.pending.load(Ordering::SeqCst) == 0 {
+                return; // 全部目录已处理完毕
+            } else {
+                // 队列暂时为空但仍有在飞目录：等待；超时兜底重查 stop。
+                let (guard, _timeout) = self
+                    .idle
+                    .wait_timeout(q, Duration::from_millis(200))
+                    .unwrap_or_else(|p| p.into_inner());
+                q = guard;
+            }
+        }
+    }
+
+    fn run(&self) {
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(MAX_WALKERS)
+            .max(1);
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| self.worker());
+            }
+        });
+    }
 }
 
 /// 校验扫描目标（对标 analyze 接受的扫描目标形态：绝对路径、存在、目录）。
@@ -137,25 +254,27 @@ fn validate_scan_target(root: &str) -> Result<PathBuf, String> {
 /// 扫描一个目录：返回其子项（含递归大小）与 Top 大文件。
 pub fn scan_path(root: &str) -> Result<ScanResult, String> {
     let root_path = validate_scan_target(root)?;
-    let state_deadline = Instant::now() + SCAN_DEADLINE;
-    let mut state = ScanState {
-        seen_inodes: HashSet::new(),
-        large: std::collections::BinaryHeap::new(),
-        deadline: state_deadline,
-        truncated: false,
-    };
+    let deadline = Instant::now() + SCAN_DEADLINE;
 
-    let mut entries: Vec<DirEntry> = Vec::new();
-    let mut total_size = 0u64;
-    let mut total_files = 0u64;
-    let mut total_dirs = 0u64;
-
+    // 顶层枚举：目录建桶（等待并行求和），文件直接计数。
     let Ok(children) = std::fs::read_dir(&root_path) else {
         return Err("无法读取目录".into());
     };
+    enum Kind {
+        Symlink,
+        Dir,
+        File(std::fs::Metadata),
+    }
+    struct TopEntry {
+        name: String,
+        path: PathBuf,
+        last_access: u64,
+        kind: Kind,
+    }
+    let mut tops: Vec<TopEntry> = Vec::new();
+    let mut _dir_count = 0usize;
     for child in children.flatten() {
-        if Instant::now() >= state.deadline {
-            state.truncated = true;
+        if Instant::now() >= deadline {
             break;
         }
         let Ok(ft) = child.file_type() else { continue };
@@ -168,44 +287,86 @@ pub fn scan_path(root: &str) -> Result<ScanResult, String> {
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-
-        let (is_dir, size) = if ft.is_symlink() {
-            (false, 0)
+        let kind = if ft.is_symlink() {
+            Kind::Symlink
         } else if ft.is_dir() {
-            total_dirs += 1;
-            (true, dir_size(&path, &mut state, &mut total_files, &mut total_dirs))
+            _dir_count += 1;
+            Kind::Dir
         } else {
             match child.metadata() {
-                Ok(meta) => {
-                    total_files += 1;
-                    (false, state.count_file(&path, &name, &meta))
-                }
-                Err(_) => (false, 0),
+                Ok(meta) => Kind::File(meta),
+                Err(_) => Kind::Symlink, // 不可读：不计大小
             }
         };
-
-        total_size += size;
-        entries.push(DirEntry {
+        tops.push(TopEntry {
             name,
-            path: path.to_string_lossy().to_string(),
-            size,
-            is_dir,
+            path,
             last_access,
+            kind,
         });
     }
 
-    // 大文件堆 → 时间序倒序列出（大→小，对标堆导出顺序）。
-    let mut large_files: Vec<FileEntry> = state
-        .large
-        .into_iter()
-        .map(|std::cmp::Reverse((size, path, name))| FileEntry {
-            name,
-            path: path.to_string_lossy().to_string(),
-            size,
-        })
-        .collect();
+    let dir_count = tops
+        .iter()
+        .filter(|t| matches!(t.kind, Kind::Dir))
+        .count();
+    let walker = ParallelWalker::new(dir_count, deadline);
+    let mut top_sizes: Vec<u64> = vec![0; tops.len()];
+    let mut dir_bucket = 0usize;
+    for (idx, t) in tops.iter().enumerate() {
+        match &t.kind {
+            Kind::Symlink => {}
+            Kind::Dir => {
+                walker.push_dir(t.path.clone(), dir_bucket);
+                dir_bucket += 1;
+            }
+            Kind::File(meta) => {
+                top_sizes[idx] = walker.count_file(&t.path, &t.name, meta, None);
+            }
+        }
+    }
+
+    walker.run();
+
+    let truncated = walker.stop.load(Ordering::Relaxed);
+    let total_files = walker.total_files.load(Ordering::Relaxed);
+    let total_dirs = walker.total_dirs.load(Ordering::Relaxed);
+    let total_size = walker.total_size.load(Ordering::Relaxed);
+
+    // 大文件堆 → 大→小（对标堆导出顺序）。
+    let mut large_files: Vec<FileEntry> = {
+        let mut st = walker.state.lock().unwrap_or_else(|p| p.into_inner());
+        std::mem::take(&mut st.large)
+            .into_iter()
+            .map(|std::cmp::Reverse((size, path, name))| FileEntry {
+                name,
+                path: path.to_string_lossy().to_string(),
+                size,
+            })
+            .collect()
+    };
     large_files.sort_by(|a, b| b.size.cmp(&a.size));
 
+    let mut entries: Vec<DirEntry> = Vec::with_capacity(tops.len());
+    let mut dir_bucket = 0usize;
+    for (idx, t) in tops.into_iter().enumerate() {
+        let (is_dir, size) = match t.kind {
+            Kind::Symlink => (false, 0),
+            Kind::Dir => {
+                let size = walker.buckets[dir_bucket].load(Ordering::Relaxed);
+                dir_bucket += 1;
+                (true, size)
+            }
+            Kind::File(_) => (false, top_sizes[idx]),
+        };
+        entries.push(DirEntry {
+            name: t.name,
+            path: t.path.to_string_lossy().to_string(),
+            size,
+            is_dir,
+            last_access: t.last_access,
+        });
+    }
     // 条目按大小降序（对标 TUI 的按大小排序展示）。
     entries.sort_by(|a, b| b.size.cmp(&a.size));
 
@@ -216,7 +377,7 @@ pub fn scan_path(root: &str) -> Result<ScanResult, String> {
         total_size,
         total_files,
         total_dirs,
-        truncated: state.truncated,
+        truncated,
     })
 }
 
@@ -348,6 +509,26 @@ mod tests {
         assert_eq!(result.total_size, 512);
         let link = result.entries.iter().find(|e| e.name == "link.bin").unwrap();
         assert_eq!(link.size, 0);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 并行扫描下硬链接（nlink>1，同 dev+ino）仍只计一次。
+    #[test]
+    fn hardlinks_counted_once() {
+        let root = tmp("hardlink");
+        let dir = root.join("d");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.bin"), vec![0u8; 4096]).unwrap();
+        std::fs::hard_link(dir.join("a.bin"), root.join("b.bin")).unwrap();
+        let result = scan_path(&root.to_string_lossy()).unwrap();
+        // 4096 只计一次：b.bin（顶层）与 d 内 a.bin 同 inode。
+        // 哪个条目承载大小取决于遍历顺序（read_dir 顺序本就不保证，
+        // 与原串行实现一致），确定性不变量是总量与"恰有一条非零"。
+        assert_eq!(result.total_size, 4096);
+        let b = result.entries.iter().find(|e| e.name == "b.bin").unwrap();
+        let d = result.entries.iter().find(|e| e.name == "d").unwrap();
+        assert_eq!(b.size + d.size, 4096);
+        assert!(b.size == 4096 || d.size == 4096);
         std::fs::remove_dir_all(&root).ok();
     }
 

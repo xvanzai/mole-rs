@@ -6,7 +6,7 @@
  * 刷新节奏由后端 Collector 状态机维持（对标 watchState），前端每秒
  * 调用一次 status_tick 即可。
  */
-import { computed, onBeforeUnmount, onMounted, ref, watchEffect } from "vue";
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watchEffect } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
 interface CpuStatus {
@@ -175,13 +175,24 @@ async function tick() {
   }
 }
 
-onMounted(() => {
+function start() {
+  if (timer !== undefined) return;
   void tick();
   timer = window.setInterval(tick, 1000);
-});
-onBeforeUnmount(() => {
-  if (timer !== undefined) window.clearInterval(timer);
-});
+}
+function stop() {
+  if (timer !== undefined) {
+    window.clearInterval(timer);
+    timer = undefined;
+  }
+}
+
+// 页面被 KeepAlive 缓存：切出标签页时暂停每秒采集（不让后台页持续
+// 占用后端采集），切回立即恢复一帧。
+onMounted(start);
+onActivated(start);
+onDeactivated(stop);
+onBeforeUnmount(stop);
 
 /** 与后端一致的二进制单位格式化（经 Rust 单一实现，对标 units.BytesBin）。 */
 async function bin(bytes: number): Promise<string> {

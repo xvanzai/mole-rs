@@ -6,7 +6,7 @@
  * 容量语义与原实现一致（分配大小、扫描内硬链接去重、符号链接不计）。
  * 删除仅限当前层的直接子项，走回收站（可恢复）。
  */
-import { computed, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { confirm } from "../composables/confirm";
 
@@ -47,17 +47,23 @@ const selected = ref<Set<string>>(new Set());
 const executing = ref(false);
 const result = ref<ExecuteResult | null>(null);
 const showLarge = ref(false);
+/** 是否已开始（对标 CLI 需手动运行 mo analyze，不自动扫描）。 */
+const started = ref(false);
 
-async function init() {
+onMounted(async () => {
+  // 仅预填起始路径；扫描由用户显式触发。
   try {
     home.value = await invoke<string>("get_home_dir");
     if (!pathInput.value) pathInput.value = home.value;
-    await doScan(pathInput.value);
   } catch {
-    await doScan("/");
+    /* 预填失败不影响手动输入 */
   }
+});
+
+async function startScan() {
+  started.value = true;
+  await doScan(pathInput.value || home.value || "/");
 }
-init();
 
 async function doScan(target: string) {
   loading.value = true;
@@ -160,6 +166,18 @@ function mb(bytes: number): string {
         </button>
       </div>
     </header>
+
+    <div v-if="!started && !loading" class="idle">
+      <p class="idle-icon">🔍</p>
+      <h3>磁盘分析</h3>
+      <p class="sub">
+        单层浏览目录占用分布（分配大小、硬链接去重、符号链接不计，对标
+        <code>mo analyze</code>）。并行扫描，30s 预算内未完成会标记部分值。
+      </p>
+      <button class="start" :disabled="loading || !pathInput" @click="startScan">
+        开始扫描
+      </button>
+    </div>
 
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="scan?.truncated" class="warn">
@@ -411,5 +429,44 @@ function mb(bytes: number): string {
 .empty {
   text-align: center;
   padding: 32px 0;
+}
+
+.idle {
+  text-align: center;
+  padding: 72px 24px;
+  background: var(--surface);
+  border: 1px dashed var(--border);
+  border-radius: 14px;
+}
+
+.idle-icon {
+  font-size: 34px;
+  margin: 0 0 8px;
+}
+
+.idle h3 {
+  margin: 0 0 6px;
+  font-size: 16px;
+}
+
+.idle .sub {
+  max-width: 460px;
+  margin: 0 auto 18px;
+}
+
+.start {
+  padding: 9px 26px;
+  border: none;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.start:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 </style>

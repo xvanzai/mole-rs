@@ -6,7 +6,7 @@
  * （含 iOS Wrapper 回退）+ 卸载模式保护分级（系统关键 🛡 / Apple 可卸载）。
  * 应用本体删除与残留查找（find_app_files）在下一子片落地。
  */
-import { computed, onMounted, ref } from "vue";
+import { computed, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
 interface AppInfo {
@@ -22,9 +22,11 @@ interface AppInfo {
 }
 
 const apps = ref<AppInfo[]>([]);
-const loading = ref(true);
+const loading = ref(false);
 const error = ref("");
 const query = ref("");
+/** 是否已开始（不自动扫描，由用户显式触发）。 */
+const started = ref(false);
 
 async function load() {
   loading.value = true;
@@ -37,7 +39,12 @@ async function load() {
     loading.value = false;
   }
 }
-onMounted(load);
+
+/** 开始：应用清单扫描（并行测径，仅只读）。 */
+async function startScan() {
+  started.value = true;
+  await load();
+}
 
 const filtered = computed(() => {
   const q = query.value.trim().toLowerCase();
@@ -65,16 +72,29 @@ function mb(bytes: number): string {
     <header class="head">
       <div>
         <h2>应用卸载</h2>
-        <p class="sub">
+        <p class="sub" v-if="started || apps.length">
           {{ apps.length }} 个应用 · 共 {{ mb(totalSize) }}。删除与残留清理将在
           下一子片开放（需逐行移植 find_app_files 安全汇）。
         </p>
+        <p class="sub" v-else>应用清单与保护分级（只读，对标 <code>mo uninstall</code>）。</p>
       </div>
       <input v-model="query" class="search" placeholder="搜索应用或 Bundle ID…" />
       <button class="rescan" :disabled="loading" @click="load">
         {{ loading ? "扫描中…" : "重新扫描" }}
       </button>
     </header>
+
+    <div v-if="!started && !loading && !apps.length" class="idle">
+      <p class="idle-icon">📦</p>
+      <h3>应用卸载</h3>
+      <p class="sub">
+        扫描 /Applications、~/Applications、输入法目录与外置卷
+        （对标 <code>mo uninstall</code> 清单阶段），并标记系统保护应用。
+      </p>
+      <button class="start" :disabled="loading" @click="startScan">
+        开始扫描
+      </button>
+    </div>
 
     <p v-if="error" class="error">{{ error }}</p>
 
@@ -90,7 +110,7 @@ function mb(bytes: number): string {
         </span>
         <span class="size">{{ mb(a.size_bytes) }}</span>
       </div>
-      <p v-if="!filtered.length && !loading" class="sub empty">没有匹配的应用。</p>
+      <p v-if="started && !filtered.length && !loading" class="sub empty">没有匹配的应用。</p>
     </div>
   </section>
 </template>
@@ -221,5 +241,45 @@ function mb(bytes: number): string {
 .empty {
   text-align: center;
   padding: 32px 0;
+}
+
+.idle {
+  text-align: center;
+  padding: 72px 24px;
+  background: var(--surface);
+  border: 1px dashed var(--border);
+  border-radius: 14px;
+  margin-bottom: 14px;
+}
+
+.idle-icon {
+  font-size: 34px;
+  margin: 0 0 8px;
+}
+
+.idle h3 {
+  margin: 0 0 6px;
+  font-size: 16px;
+}
+
+.idle .sub {
+  max-width: 460px;
+  margin: 0 auto 18px;
+}
+
+.start {
+  padding: 9px 26px;
+  border: none;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.start:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 </style>

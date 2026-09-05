@@ -90,18 +90,59 @@ fn plist_string(dict: &plist::Dictionary, key: &str) -> Option<String> {
     dict.get(key).and_then(|v| v.as_string()).map(|s| s.to_string())
 }
 
-/// 解析应用的 bundle ID（含 iOS Wrapper 回退，对标 batch.sh）。
-fn resolve_bundle_id(app: &Path) -> String {
-    let main_plist = app.join("Contents/Info.plist");
-    if let Some(dict) = read_info_plist(&main_plist) {
-        if let Some(id) = plist_string(&dict, "CFBundleIdentifier") {
-            let id = sanitize_bundle_id(&id);
-            if !id.is_empty() {
-                return id;
-            }
-        }
+/// 后台专用判定（对标 uninstall_app_is_background_only 的取值集合）。
+fn ls_background_only(dict: Option<&plist::Dictionary>) -> bool {
+    matches!(
+        dict.and_then(|d| plist_string(d, "LSBackgroundOnly")).as_deref(),
+        Some("1" | "YES" | "yes" | "TRUE" | "true")
+    )
+}
+
+/// 从 Info.plist（单次读取）提取清单元数据；bundle ID 为空时回退
+/// Wrapper/*.app/Info.plist（iOS 应用，对标 batch.sh）。
+struct AppMeta {
+    bundle_id: String,
+    background_only: bool,
+    version: String,
+    name: String,
+}
+
+fn read_app_meta(app: &Path) -> AppMeta {
+    let dict = read_info_plist(&app.join("Contents/Info.plist"));
+    let dir_name = app
+        .file_stem()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let bundle_id = dict
+        .as_ref()
+        .and_then(|d| plist_string(d, "CFBundleIdentifier"))
+        .map(|s| sanitize_bundle_id(&s))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| resolve_wrapper_bundle_id(app));
+    let version = dict
+        .as_ref()
+        .and_then(|d| {
+            plist_string(d, "CFBundleShortVersionString")
+                .or_else(|| plist_string(d, "CFBundleVersion"))
+        })
+        .unwrap_or_default();
+    let name = dict
+        .as_ref()
+        .and_then(|d| {
+            plist_string(d, "CFBundleDisplayName").or_else(|| plist_string(d, "CFBundleName"))
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or(dir_name);
+    AppMeta {
+        bundle_id,
+        background_only: ls_background_only(dict.as_ref()),
+        version,
+        name,
     }
-    // Wrapper 回退：iOS 应用真实 plist 在 Wrapper/<name>.app/Info.plist。
+}
+
+/// Wrapper 回退：iOS 应用真实 plist 在 Wrapper/<name>.app/Info.plist。
+fn resolve_wrapper_bundle_id(app: &Path) -> String {
     if let Ok(wrappers) = std::fs::read_dir(app.join("Wrapper")) {
         for wrapper in wrappers.flatten() {
             let plist_path = wrapper.path().join("Info.plist");
@@ -116,30 +157,6 @@ fn resolve_bundle_id(app: &Path) -> String {
         }
     }
     "unknown".into()
-}
-
-/// 后台专用应用（对标 uninstall_app_is_background_only）。
-fn is_background_only(app: &Path) -> bool {
-    matches!(
-        read_info_plist(&app.join("Contents/Info.plist"))
-            .and_then(|d| plist_string(&d, "LSBackgroundOnly"))
-            .as_deref(),
-        Some("1" | "YES" | "yes" | "TRUE" | "true")
-    )
-}
-
-/// 展示名：CFBundleDisplayName → CFBundleName → 目录名。
-fn display_name(app: &Path) -> String {
-    let dir_name = app
-        .file_stem()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-    read_info_plist(&app.join("Contents/Info.plist"))
-        .and_then(|d| {
-            plist_string(&d, "CFBundleDisplayName").or_else(|| plist_string(&d, "CFBundleName"))
-        })
-        .filter(|s| !s.is_empty())
-        .unwrap_or(dir_name)
 }
 
 /// 整串锚定的 bundle 模式匹配（对标 build_regex_var：点转义、`*`→任意、
@@ -171,11 +188,18 @@ fn is_app_bundle(path: &Path) -> bool {
     name.ends_with(".app")
 }
 
+/// 并行测径线程数上限（IO 密集，8 以上收益递减）。
+const SIZE_WORKERS: usize = 8;
+
 /// 列出全部应用（对标应用清单阶段；只读）。
+///
+/// 性能：应用元数据每只 .app 只读一次 Info.plist；测径（每只上限 2s，
+/// 1:1 对标）改为跨应用并行——44 只应用串行最坏 88s，并行后 ≈ 单只耗时。
 pub fn list_apps() -> Vec<AppInfo> {
-    let mut apps: Vec<AppInfo> = Vec::new();
     let roots = search_dirs();
 
+    // 阶段一：目录遍历 + 元数据分类（单线程，plist 读取很快）。
+    let mut apps: Vec<AppInfo> = Vec::new();
     for dir in &roots {
         // maxdepth 3 探测 *.app。
         let mut stack: Vec<(PathBuf, usize)> = vec![(dir.clone(), 0)];
@@ -194,35 +218,25 @@ pub fn list_apps() -> Vec<AppInfo> {
                     {
                         continue;
                     }
-                    let bundle_id = resolve_bundle_id(&path);
-                    let background = is_background_only(&path);
+                    let meta = read_app_meta(&path);
                     let directly_in_root = path.parent().map(|p| p == dir).unwrap_or(false);
                     // 对标：后台专用应用仅当直接位于搜索根时列出。
-                    if background && !directly_in_root {
+                    if meta.background_only && !directly_in_root {
                         continue;
                     }
-                    let protected = should_protect_from_uninstall(&bundle_id);
+                    let protected = should_protect_from_uninstall(&meta.bundle_id);
                     let uninstallable = crate::clean::protect_data::APPLE_UNINSTALLABLE_APPS
                         .iter()
-                        .any(|p| anchored_bundle_match(&bundle_id, p));
-                    let size = crate::clean::path_size_with_deadline(
-                        &path,
-                        std::time::Instant::now() + std::time::Duration::from_secs(2),
-                    );
+                        .any(|p| anchored_bundle_match(&meta.bundle_id, p));
                     apps.push(AppInfo {
                         path: path.to_string_lossy().to_string(),
-                        name: display_name(&path),
-                        bundle_id,
-                        version: read_info_plist(&path.join("Contents/Info.plist"))
-                            .and_then(|d| {
-                                plist_string(&d, "CFBundleShortVersionString")
-                                    .or_else(|| plist_string(&d, "CFBundleVersion"))
-                            })
-                            .unwrap_or_default(),
-                        size_bytes: size,
+                        name: meta.name,
+                        bundle_id: meta.bundle_id,
+                        version: meta.version,
+                        size_bytes: 0,
                         protected,
                         uninstallable,
-                        background_only: background,
+                        background_only: meta.background_only,
                         in_search_root: directly_in_root,
                     });
                     continue; // .app 内部不再下钻
@@ -234,6 +248,38 @@ pub fn list_apps() -> Vec<AppInfo> {
                 }
             }
         }
+    }
+
+    // 阶段二：并行测径（对标 du -sk 的语义，每只 2s 上限）。
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    let cursor = AtomicUsize::new(0);
+    let sizes: Vec<AtomicU64> = (0..apps.len()).map(|_| AtomicU64::new(0)).collect();
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(SIZE_WORKERS)
+        .max(1);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let i = cursor.fetch_add(1, Ordering::SeqCst);
+                    if i >= apps.len() {
+                        return;
+                    }
+                    let deadline =
+                        std::time::Instant::now() + std::time::Duration::from_secs(2);
+                    let size = crate::clean::path_size_with_deadline(
+                        Path::new(&apps[i].path),
+                        deadline,
+                    );
+                    sizes[i].store(size, Ordering::Relaxed);
+                }
+            });
+        }
+    });
+    for (a, size) in apps.iter_mut().zip(&sizes) {
+        a.size_bytes = size.load(Ordering::Relaxed);
     }
 
     // 去重 + 按名称排序。
