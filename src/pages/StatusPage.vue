@@ -71,6 +71,17 @@ interface HardwareInfo {
   os_version: string;
   refresh_rate: string;
 }
+interface GpuStatus {
+  name: string;
+  usage: number;
+  core_count: number;
+  note: string;
+}
+interface BluetoothDevice {
+  name: string;
+  connected: boolean;
+  battery: string;
+}
 interface MetricsSnapshot {
   collected_at: number;
   host: string;
@@ -82,12 +93,14 @@ interface MetricsSnapshot {
   health_score: number;
   health_score_msg: string;
   cpu: CpuStatus;
+  gpu: GpuStatus[];
   memory: MemoryStatus;
   disks: DiskStatus[];
   network: NetworkStatus[];
   network_history: { rx_history: number[]; tx_history: number[] };
   proxy: { enabled: boolean; type: string; host: string };
   batteries: BatteryStatus[];
+  bluetooth: BluetoothDevice[];
   thermal: {
     fan_speed: number;
     system_power: number;
@@ -116,6 +129,7 @@ const EMPTY: MetricsSnapshot = {
   },
   health_score: 0,
   health_score_msg: "",
+  gpu: [],
   cpu: {
     usage: 0,
     per_core: [],
@@ -143,6 +157,7 @@ const EMPTY: MetricsSnapshot = {
   network_history: { rx_history: [], tx_history: [] },
   proxy: { enabled: false, type: "", host: "" },
   batteries: [],
+  bluetooth: [],
   thermal: { fan_speed: 0, system_power: 0, adapter_power: 0, battery_power: 0 },
   top_processes: [],
   zombie_count: null,
@@ -351,6 +366,37 @@ const battery = computed(() => snap.value.batteries[0]);
         <p class="meta" v-if="snap.proxy.enabled">
           {{ snap.proxy.type }} · {{ snap.proxy.host }}
         </p>
+      </article>
+
+      <!-- GPU -->
+      <article class="card" v-if="snap.gpu.length">
+        <h3>GPU</h3>
+        <div v-for="g in snap.gpu" :key="g.name" class="disk-row">
+          <div class="disk-label">
+            <span>{{ g.name }}</span>
+            <span class="sub">
+              {{ g.usage >= 0 ? `${g.usage.toFixed(0)}%` : "需 root" }}
+              <template v-if="g.core_count"> · {{ g.core_count }} 核</template>
+            </span>
+          </div>
+          <div v-if="g.usage >= 0" class="bar">
+            <div
+              class="bar-fill"
+              :style="{ width: `${Math.min(g.usage, 100)}%`, background: 'var(--accent)' }"
+            />
+          </div>
+          <p class="meta" v-if="g.note">{{ g.note }}</p>
+        </div>
+      </article>
+
+      <!-- Bluetooth -->
+      <article class="card" v-if="snap.bluetooth.length">
+        <h3>蓝牙设备</h3>
+        <div v-for="(d, i) in snap.bluetooth" :key="`${d.name}-${i}`" class="net-row">
+          <span class="net-name">{{ d.name }}</span>
+          <span class="sub">{{ d.connected ? "已连接" : "未连接" }}</span>
+          <span class="net-rate" v-if="d.battery">🔋 {{ d.battery }}</span>
+        </div>
       </article>
 
       <!-- Battery / Power -->

@@ -198,3 +198,26 @@
 
 - 78 个测试通过：探测输出校验（绝对路径/`..`/控制字符/尾斜杠）、corepack 默认路径、npm 探测回退、路径规范化；保护层/删除/白名单既有测试无回归。
 - 真机冒烟：82 组（新增 npm 残留 4 行探测生效，npm cache directory 164.93 MB）。
+
+---
+
+<a name="status-系统监控-gpu-bt"></a>
+## status 系统监控（增量子片：GPU + 蓝牙）
+
+### 对标记录
+
+- `metrics_gpu.go`（196 行）1:1：静态 GPU 信息经 `system_profiler -json SPDisplaysDataType`（10min 缓存，note 拼接 "VRAM x · Metal · Vendor"），实时使用率经 `powermetrics --samplers gpu_power`（5s 缓存；解析 "GPU HW active residency" 并以 idle residency 回退推导；powermetrics 通常需 root，失败返回 -1 哨兵，与 Go 一致），使用率只应用到第一块 GPU。
+- `metrics_bluetooth.go`（138 行）1:1：`system_profiler SPBluetoothDataType` 缩进层级解析（顶层节重置、8 空格设备头、Connected/Battery Level）→ `bluetoothctl info` 回退 → 30s 缓存 + "No Bluetooth info" 占位。
+
+### 变更前后对照
+
+| 项 | 原实现（Go） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| GPU JSON 解析 | struct unmarshal | serde_json Value 字段访问 | 无行为变更 | 字段名一致（_name/spdisplays_vram/spdisplays_vendor/spdisplays_metal/sppci_cores） |
+| GPU usage 正则 | regexp 两个模式 | 字符串定位 + 数字前缀截取 | 无行为变更 | 等价（固定标记 + 浮点） |
+| nvidia-smi 分支 | 非 darwin 平台 | 未移植 | **平台差异** | 本应用仅支持 macOS，darwin 分支恒可达 |
+| UI | TUI GPU/蓝牙行 | Vue GPU 卡（usage=-1 显示"需 root"）+ 蓝牙设备列表 | 平台差异 | TUI → GUI |
+
+### 测试
+
+- 83 个测试通过（新增 JSON 解析、usage 正则等价、蓝牙缩进解析含顶层节重置与空回退、bluetoothctl 解析）。

@@ -10,6 +10,8 @@
 //! - 慢缓存：硬件 10min、system_profiler 30s、接口 IP 10s。
 
 mod battery;
+mod bluetooth;
+mod gpu;
 mod cpu;
 mod disk;
 mod hardware;
@@ -178,6 +180,10 @@ pub struct Collector {
 
     // system_profiler 缓存（30s），对标 cachedPower/cachedPowerJSON。
     power_cache: battery::PowerCache,
+    // GPU 静态信息（10min）与使用率（5s）缓存，对标 cachedGPU 系列字段。
+    gpu_cache: gpu::GpuCache,
+    // 蓝牙 30s 缓存（对标 lastBT/lastBTAt）。
+    bt_cache: bluetooth::BluetoothCache,
 
     // 废纸篓大小缓存（5s），对标 trashSizeCache。
     trash_cache: Option<(u64, bool, Instant)>,
@@ -259,6 +265,8 @@ impl Collector {
             cached_net_ips: HashMap::new(),
             last_net_ip_at: None,
             power_cache: battery::PowerCache::default(),
+            gpu_cache: gpu::GpuCache::default(),
+            bt_cache: bluetooth::BluetoothCache::default(),
             trash_cache: None,
             ready: false,
             last_full_at: None,
@@ -385,6 +393,8 @@ impl Collector {
         let trash = self.collect_trash();
         let batteries = battery::collect_batteries(&mut self.power_cache);
         let thermal = battery::collect_thermal(&mut self.power_cache);
+        let gpu_list = gpu::collect_gpu(&mut self.gpu_cache);
+        let bluetooth_list = bluetooth::collect_bluetooth(&mut self.bt_cache);
         let proxy = network::collect_proxy();
 
         // 硬件信息缓存 10 分钟（对标 snapshotFromMetrics 的 refreshHardware）。
@@ -421,7 +431,7 @@ impl Collector {
             health_score,
             health_score_msg,
             cpu,
-            gpu: Vec::new(),
+            gpu: gpu_list,
             memory,
             disks,
             trash_size: trash.0,
@@ -436,7 +446,7 @@ impl Collector {
             batteries,
             thermal,
             sensors: Vec::new(),
-            bluetooth: Vec::new(),
+            bluetooth: bluetooth_list,
             top_processes: Vec::new(),
             process_collected_at: None,
             process_stale: None,
