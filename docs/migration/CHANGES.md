@@ -248,3 +248,30 @@
 
 - 90 个测试通过（新增：#1459 容器守卫、嵌套折叠、vendor/bin/DerivedData 分级、深度规则与单项目模式、CACHEDIR.TAG 签名、walk prune/排除、活动分级、路径消失=old）。
 - 真机冒烟：发现 1 个搜索根、0 产物（本机项目在 HOME 外，符合预期；自定义路径经配置文件支持）。
+
+---
+
+<a name="analyze-磁盘分析"></a>
+## analyze 磁盘分析（模块5，第一片：扫描器 + 浏览 + Trash 删除）
+
+### 对标记录
+
+- 原代码：`cmd/analyze` 的 `model.go`（数据结构）、`scanner.go`（容量语义）、`delete.go`（删除入口）；TUI（update.go/view.go，约 1,800 行）由 Vue 页替代。
+- 数据模型 1:1：单层目录浏览 + 按需下钻（dirEntry/fileEntry/scanResult）。
+- 容量语义 1:1：文件计 `min(blocks*512, len)`（实际占用，对标 getActualFileSize）；同一次扫描内硬链接（nlink>1，dev+ino）只计一次（对标 countableFileSize 的 seen map）；符号链接不计大小；Top-20 大文件（对标 maxLargeFiles 最小堆，导出按大小降序）。
+
+### 变更前后对照
+
+| 项 | 原实现（Go） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| 并发扫描 | goroutine + channel + 信号量 | 单线程有界遍历 | **实现差异（语义一致）** | Rust 原生遍历足够快（3.2GB/2万文件 <1s）；并发调度属 TUI 渲染节奏配套 |
+| 大文件发现 | mdfind（Spotlight）预热 + 扫描堆 | 纯扫描堆（无下限阈值） | **简化** | Top-20 结果集合等价；Spotlight 快速预热属性能优化，后续子片可加 |
+| entriesHeap=30 | TUI 每层仅展示 Top30 | 返回全部子项 | **变更** | GUI 列表可滚动，TUI 堆是终端展示约束 |
+| 缓存层 cache.go（820 行） | 磁盘缓存（TTL 7 天、schema 版本、准入预算） | 未实现 | **暂缓** | GUI 按需下钻成本低；重复扫描预算 30s 封顶，缓存层作为后续子片 |
+| 快照对比 snapshots.go / 概览 overview | 概览缓存与对比 | 未实现 | **暂缓** | 独立子片 |
+| 删除入口 | delete.go 确认后 mole_delete | 仅当前层直接子项 → clean::delete 统一 Trash | 无行为变更（加强） | 直接子项校验防路径注入 |
+
+### 测试
+
+- 95 个测试通过（新增：递归求和与计数、Top-20 截断、符号链接不计、非直接子项拒绝/dry-run/注入路径拒绝、扫描目标校验）。
+- 真机冒烟：扫描 src-tauri 3,235.5 MB / 19,721 文件 / 980 目录，target/ 正确定位为最大子项，未截断。
