@@ -145,3 +145,29 @@
 
 - 71 个测试通过：保护层各层（关键词/容器/EDR/E5RT/共享根/Codex 叶）、`should_protect_data` case 组、路径验证拒绝矩阵（含 `name..files` 合例外、Homebrew 子条目放行）、trash 直移 + 双日志 + dry-run 语义（MOLE_TEST_TRASH_DIR 缝）。
 - 真机 dry-run 全链路冒烟：30 项、0 删除、保护层正确拦截。
+
+---
+
+<a name="clean-深度清理3c"></a>
+## clean 深度清理（子模块 3c 第一片：开发工具链清理族）
+
+### 对标记录
+
+- 原代码：`lib/clean/dev.sh`（5,554 行）的普通 `safe_clean` 行，按原函数分组为 7 个清理族：前端构建（clean_dev_frontend + yarn/tnpm 行）、Python（clean_dev_python 普通行）、Rust（rustup downloads 行）、Ruby/Perl（clean_dev_ruby / clean_dev_perl）、云 CLI 与容器、CI 与 DevOps。共 46 条显式行，目录总量 75 组。
+- 环境基址语义：`resolve_tool_home "${RUSTUP_HOME:-}" ~/.rustup` 移植为 CatalogEntry.home_env。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| 普通 safe_clean 行 | 逐行调用 | 目录表 1:1（含描述原文） | 无行为变更 | — |
+| RUSTUP_HOME/CARGO_HOME 解析 | resolve_tool_home | home_env 字段（env 绝对路径优先，否则 HOME） | 无行为变更 | — |
+| npm/bun/corepack/uv/mise/pip 缓存目录解析 | 探测 owner 命令/自定义路径 | **暂缓** | **暂缓** | 需 owner 命令探测逻辑，作为独立子片移植 |
+| cargo registry/cache | owner-process guard（tri-state） | **暂缓** | **暂缓** | 需进程状态三态判定，作为独立子片移植 |
+| 混合状态/模型/会话存储 | 不在目录（AGENTS.md 恢复契约分级） | 测试锁定不入目录 | 无行为变更 | registry/src、Cargo git、HuggingFace/torch/tensorflow/wandb、pypoetry/virtualenvs、.cpan/sources、.m2、AI CLI 缓存等 |
+| Android/JetBrains/浏览器/数据库/抓包工具族 | dev.sh 其余函数 | **暂缓** | **暂缓** | 涉及版本管理与泄漏配置扫描（check_multiple_versions、JetBrains Toolbox、泄漏 profile），后续子片 |
+
+### 测试
+
+- 74 个测试通过；新增：目录排除项锁定（混合状态存储/AI 会话）、描述唯一性、族标签覆盖、home_env 解析。
+- 真机冒烟：75 组扫描正常。

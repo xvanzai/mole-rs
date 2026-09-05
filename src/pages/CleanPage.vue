@@ -16,6 +16,7 @@ interface CleanItem {
 }
 interface CleanGroup {
   description: string;
+  family: string;
   items: CleanItem[];
   total_size_bytes: number;
   skipped_count: number;
@@ -171,7 +172,7 @@ function mb(bytes: number): string {
               @change="toggleGroup(g.description)"
             />
           </label>
-          <span class="desc">{{ g.description }}</span>
+          <span class="desc">{{ g.description }}<span class="fam">{{ g.family }}</span></span>
           <span class="size">{{ mb(g.total_size_bytes) }}</span>
         </div>
         <div v-if="expanded === g.description" class="items">
@@ -311,6 +312,15 @@ function mb(bytes: number): string {
 .desc {
   font-size: 13.5px;
   font-weight: 500;
+}
+
+.fam {
+  margin-left: 8px;
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  background: var(--surface-inset);
+  border-radius: 4px;
+  padding: 1px 6px;
 }
 
 .size {

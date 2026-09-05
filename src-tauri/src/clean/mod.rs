@@ -41,6 +41,8 @@ pub struct CleanItem {
 #[derive(Debug, Clone, Serialize)]
 pub struct CleanGroup {
     pub description: String,
+    /// 所属清理族（对标 dev.sh 的 clean_dev_* 分组）。
+    pub family: String,
     pub items: Vec<CleanItem>,
     pub total_size_bytes: u64,
     pub skipped_count: usize,
@@ -106,12 +108,30 @@ pub(crate) fn command_exists(name: &str) -> bool {
 }
 
 /// 展开 `~` 为用户主目录。
-fn expand_home(pattern: &str) -> PathBuf {    if let Some(rest) = pattern.strip_prefix("~/") {
+fn expand_home(pattern: &str) -> PathBuf {
+    if let Some(rest) = pattern.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {
             return Path::new(&home).join(rest);
         }
     }
     PathBuf::from(pattern)
+}
+
+/// 解析目录条目的完整路径模式。
+///
+/// 对标 `resolve_tool_home "${ENV:-}" default`：带 home_env 的条目在
+/// 环境变量存在且为绝对路径时以它为基址，否则以 HOME 为基址
+/// （path 为相对基址的子路径）；`~/` 前缀条目按原样展开。
+fn resolve_entry_path(entry: &catalog::CatalogEntry) -> PathBuf {
+    if let Some(env_name) = entry.home_env {
+        let base = std::env::var(env_name).ok().filter(|v| v.starts_with('/'));
+        let home = std::env::var("HOME").unwrap_or_default();
+        return match base {
+            Some(base) => Path::new(&base).join(entry.path),
+            None => Path::new(&home).join(entry.path),
+        };
+    }
+    expand_home(entry.path)
 }
 
 /// 组件级 glob 展开（对标 shell nullglob 展开）。
@@ -213,8 +233,8 @@ pub fn scan_preview() -> CleanPreview {
     let whitelist = whitelist::Whitelist::load();
     let mut groups = Vec::new();
 
-    for entry in catalog::apple_user_cache_catalog() {
-        let pattern = expand_home(entry.path);
+    for entry in catalog::full_catalog() {
+        let pattern = resolve_entry_path(&entry);
         let mut items = Vec::new();
         let mut skipped = 0usize;
         let mut total = 0u64;
@@ -243,6 +263,7 @@ pub fn scan_preview() -> CleanPreview {
 
         groups.push(CleanGroup {
             description: entry.description.to_string(),
+            family: catalog::family_label(entry.family).to_string(),
             items,
             total_size_bytes: total,
             skipped_count: skipped,
@@ -273,11 +294,11 @@ pub fn execute_clean(selected_groups: &[String], dry_run: bool) -> CleanExecuteR
 
     delete::log_session_start("clean");
 
-    for entry in catalog::apple_user_cache_catalog() {
+    for entry in catalog::full_catalog() {
         if !selected_groups.iter().any(|s| s == entry.description) {
             continue;
         }
-        let pattern = expand_home(entry.path);
+        let pattern = resolve_entry_path(&entry);
         for target in expand_glob(&pattern) {
             let target_str = target.to_string_lossy().to_string();
             // Sink 复检：扫描与执行之间状态可能变化（对标 sink re-verify）。
@@ -411,7 +432,7 @@ mod smoke_tests {
     #[test]
     #[ignore]
     fn clean_execute_dry_run_smoke() {
-        let all: Vec<String> = crate::clean::catalog::apple_user_cache_catalog()
+        let all: Vec<String> = crate::clean::catalog::full_catalog()
             .iter()
             .map(|e| e.description.to_string())
             .collect();
