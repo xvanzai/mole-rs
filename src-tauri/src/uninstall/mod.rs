@@ -183,11 +183,17 @@ pub fn list_apps() -> Vec<AppInfo> {
             let Ok(entries) = std::fs::read_dir(&cur) else { continue };
             for entry in entries.flatten() {
                 let path = entry.path();
-                let Ok(ft) = entry.file_type() else { continue };
-                if !ft.is_dir() {
-                    continue;
-                }
+                // 对标 `find -maxdepth 3 -iname "*.app"` + `-d` 检查：按名
+                // 匹配 .app，目录判定用 metadata（跟踪符号链接）——
+                // /Applications/Safari.app 是指向 Cryptex 的符号链接，
+                // entry.file_type() 不跟踪链接，会把它整只漏掉。
                 if is_app_bundle(&path) {
+                    if !std::fs::metadata(&path)
+                        .map(|m| m.is_dir())
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
                     let bundle_id = resolve_bundle_id(&path);
                     let background = is_background_only(&path);
                     let directly_in_root = path.parent().map(|p| p == dir).unwrap_or(false);
@@ -221,7 +227,9 @@ pub fn list_apps() -> Vec<AppInfo> {
                     });
                     continue; // .app 内部不再下钻
                 }
-                if depth < 3 {
+                // 非 .app：仅下钻真实目录（find 不进入符号链接目录）。
+                let Ok(ft) = entry.file_type() else { continue };
+                if ft.is_dir() && depth < 3 {
                     stack.push((path, depth + 1));
                 }
             }

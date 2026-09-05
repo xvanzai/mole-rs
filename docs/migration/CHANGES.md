@@ -330,6 +330,42 @@
 
 ---
 
+<a name="runtime-命令层"></a>
+## 运行时修复：命令层主线程冻结（全局）+ uninstall 符号链接漏列
+
+### 问题（真机实测）
+
+1. **全部重命令冻结 UI**：`sample` 显示主线程过半时间阻塞在
+   `run_invoke_handler → analyze_scan → dir_size`（status_tick / clean_preview /
+   purge_scan / uninstall_list_apps 同理）。原因：Tauri 2 的**同步命令**经
+   WKScriptMessage 在主线程执行，扫描/子进程期间事件循环停转，窗口假死、
+   无法点击，打开任一重页面（含默认监控页的 30s full 采集）均卡死。
+2. **卸载清单漏掉符号链接应用**：本机 `/Applications/Safari.app` 是指向
+   `../System/Cryptex/App/System/Applications/Safari.app` 的符号链接，
+   Rust `entry.file_type()` 不跟踪链接 → `is_dir()==false` → 整只跳过
+   （42 个应用、protected=0）；原实现 `find -iname "*.app"` + `-d` 检查
+   （`-d` 跟踪链接）会列出 Safari 且标记 🛡。
+
+### 变更前后对照
+
+| 项 | 变更前（Rust） | 变更后（Rust） | 原因 |
+|----|------------|------------|------|
+| 命令执行模型 | 重命令为同步 `fn` → 主线程执行 → 冻结 | `async fn` + `tauri::async_runtime::spawn_blocking` → 阻塞线程池 | Tauri 2 async 命令离开主线程；对标 Go 版采集在独立 goroutine、不阻塞 TUI 的模型 |
+| `CollectorState` | `Mutex<Collector>` | `Arc<Mutex<Collector>>` | 锁需移入 `spawn_blocking` 闭包 |
+| 命令返回类型 | `T` / `Result<T,String>` 混合 | 统一 `Result<T, String>` | Tauri 把 Ok/Err 映射为 promise resolve/reject，前端 try/catch 契约不变；JoinError 有了可观察的错误通道 |
+| 保留同步的命令 | — | `format_bytes_*`、`get_home_dir`（纯 env 读取） | 微秒级，无冻结风险 |
+| uninstall 目录遍历 | `entry.file_type().is_dir()`（不跟踪链接） | `.app` 按名匹配 + `fs::metadata().is_dir()`（跟踪链接，对标 `-d`）；下钻仅限真实目录（对标 find 不进入链接目录） | 1:1 对标 `find -maxdepth 3 -iname "*.app"` |
+
+### 验证
+
+- `sample` 复测：主线程 0 样本位于 mole_rs 代码（修复前 >50%），命令处理
+  全部出现在后台线程。
+- `cargo test` 104 通过；真机冒烟 7 项通过；卸载清单 42→44 个应用、
+  Safari 正确标记 🛡（protected=1）。
+- 前端 `vue-tsc` + `vite build` 通过；13 个 invoke 命令名与注册表一一对应。
+
+---
+
 <a name="optimize-优化维护"></a>
 ## optimize 优化维护（模块7第一片：任务目录 + 执行框架 + saved_state_cleanup）
 
