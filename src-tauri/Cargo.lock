@@ -2086,6 +2086,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "mach2",
+ "plist",
  "serde",
  "serde_json",
  "tauri",

@@ -19,8 +19,8 @@ mod catalog;
 mod probe;
 pub(crate) mod delete;
 mod protect;
-mod protect_data;
-mod whitelist;
+pub(crate) mod protect_data;
+pub(crate) mod whitelist;
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};

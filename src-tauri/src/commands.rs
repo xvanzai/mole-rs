@@ -1,5 +1,13 @@
 //! Tauri 命令层：薄封装，业务逻辑在 `status` / `core` 模块。
 
+pub mod uninstall {
+    /// 应用清单（只读，对标 mo uninstall 列表阶段）。
+    #[tauri::command]
+    pub fn uninstall_list_apps() -> Vec<crate::uninstall::AppInfo> {
+        crate::uninstall::list_apps()
+    }
+}
+
 pub mod app {
     /// 用户主目录（供前端默认扫描路径）。
     #[tauri::command]

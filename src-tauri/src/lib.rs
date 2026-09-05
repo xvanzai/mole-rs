@@ -4,6 +4,7 @@ mod analyze;
 mod core;
 mod purge;
 mod status;
+mod uninstall;
 
 use core::units;
 
@@ -47,6 +48,7 @@ pub fn run() {
             commands::purge::purge_scan,
             commands::purge::purge_execute,
             commands::app::get_home_dir,
+            commands::uninstall::uninstall_list_apps,
             commands::analyze::analyze_scan,
             commands::analyze::analyze_delete
         ])

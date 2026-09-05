@@ -542,3 +542,20 @@ pub const DATA_PROTECTED_BUNDLES: &[&str] = &[
     "com.devmate.*",
     "org.sparkle-project.Sparkle*",
 ];
+
+/// Apple 应用中可以卸载的（App Store / developer.apple.com 安装）。
+/// （APPLE_UNINSTALLABLE_APPS；匹配为整串锚定，与 SYSTEM_CRITICAL_BUNDLES
+/// 同语义，先判可卸载再判系统关键。）
+pub const APPLE_UNINSTALLABLE_APPS: &[&str] = &[
+    "com.apple.dt.*",      // Xcode, Instruments, FileMerge
+    "com.apple.FinalCut*", // Final Cut Pro
+    "com.apple.Motion",
+    "com.apple.Compressor",
+    "com.apple.logic*",      // Logic Pro
+    "com.apple.garageband*", // GarageBand
+    "com.apple.iMovie",
+    "com.apple.iWork.*", // Pages, Numbers, Keynote
+    "com.apple.MainStage*",
+    "com.apple.server.*",    // macOS Server
+    "com.apple.Playgrounds", // Swift Playgrounds
+];

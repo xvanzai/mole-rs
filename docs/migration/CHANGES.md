@@ -275,3 +275,32 @@
 
 - 95 个测试通过（新增：递归求和与计数、Top-20 截断、符号链接不计、非直接子项拒绝/dry-run/注入路径拒绝、扫描目标校验）。
 - 真机冒烟：扫描 src-tauri 3,235.5 MB / 19,721 文件 / 980 目录，target/ 正确定位为最大子项，未截断。
+
+---
+
+<a name="uninstall-应用卸载"></a>
+## uninstall 应用卸载（模块6第一片：只读应用清单 + 保护分级）
+
+### 对标记录
+
+- 原代码：`bin/uninstall.sh`（搜索目录/mtimes 清单/bundle ID 解析/后台应用过滤）、`lib/uninstall/batch.sh`（Wrapper 回退）、`lib/core/app_protection.sh` 的 `should_protect_from_uninstall`。
+- 搜索目录 1:1：/Applications、~/Applications、/Library/Input Methods、~/Library/Input Methods、/Volumes/*/Applications（与 /Applications 同卷去重）。
+- bundle ID 1:1：`Contents/Info.plist` CFBundleIdentifier（`|`→`-`、控制字符剔除、`(null)` 判空）+ iOS 应用 Wrapper/*.app/Info.plist 回退。
+- 后台专用应用（LSBackgroundOnly）仅当直接位于搜索根时列出（对标）。
+- 保护分级 1:1：先判 APPLE_UNINSTALLABLE_APPS（放行）→ 再判 SYSTEM_CRITICAL_BUNDLES（保护）；build_regex_var 的 `^pattern$`（点转义、`*`→任意）与整串 glob 语义等价，用 glob_match 实现。
+- plist 读取改用纯 Rust `plist` crate（对标 plutil -extract 输出；二进制/XML 两种格式均支持）。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| plutil 子进程 | 每应用 1-2 次 plutil | plist crate 直读 | 实现差异 | 输出等价，免去每应用 fork |
+| 应用内嵌 .app 下钻 | maxdepth 3 | 相同（深度 0-3） | 无行为变更 | — |
+| 大小计量 | du -sk | path_size_with_deadline（2s 截断） | 无行为变更 | 与 clean 一致 |
+| **应用删除** | 卸载流程（登录项/LaunchServices/残留/zap） | **未实现** | **暂缓** | 删除汇按 AGENTS.md "逐行复核" 要求移植：find_app_files（约 700 行，含共享 bundle ID 兄弟守卫）、remove_file_list、Cask zap 等为第二片 |
+| brew/steam 卸载 | lib/uninstall/brew.sh、steam.sh | 未实现 | **暂缓** | 第二片 |
+
+### 测试
+
+- 98 个测试通过（新增：bundle ID 清洗、保护分级含锚定反例、搜索目录覆盖）。
+- 真机冒烟：42 个应用、bundle ID 与保护标记正确（GarageBand 归为 Apple 可卸载、系统 App 标 🛡）。

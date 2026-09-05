@@ -5,6 +5,7 @@ import StatusPage from "./pages/StatusPage.vue";
 import CleanPage from "./pages/CleanPage.vue";
 import PurgePage from "./pages/PurgePage.vue";
 import AnalyzePage from "./pages/AnalyzePage.vue";
+import UninstallPage from "./pages/UninstallPage.vue";
 
 /**
  * 应用外壳：侧边导航 + 模块页面切换。
@@ -59,8 +60,9 @@ const modules: ModuleDef[] = [
     label: "应用卸载",
     icon: "📦",
     origin: "Mole bin/uninstall.sh + lib/uninstall/*",
-    status: "模块 6 · 待迁移",
+    status: "模块 6a · 清单版",
     description: "卸载应用及其残留（启动项、偏好设置、隐藏文件）。",
+    implemented: true,
   },
   {
     id: "optimize",
@@ -131,6 +133,7 @@ const active = computed(
       <CleanPage v-else-if="activeId === 'clean'" />
       <PurgePage v-else-if="activeId === 'purge'" />
       <AnalyzePage v-else-if="activeId === 'analyze'" />
+      <UninstallPage v-else-if="activeId === 'uninstall'" />
       <PagePlaceholder v-else v-bind="active" />
     </main>
   </div>
