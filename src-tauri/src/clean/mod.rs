@@ -16,6 +16,7 @@
 //! - 受保护/白名单路径在扫描期与删除 sink 双重拦截。
 
 mod catalog;
+mod probe;
 mod delete;
 mod protect;
 mod protect_data;
@@ -228,18 +229,110 @@ fn skip_reason(path: &str, whitelist: &whitelist::Whitelist) -> Option<&'static 
     None
 }
 
+/// 统一扫描条目：静态目录行 + 动态探测行。
+struct ScanEntry {
+    family: &'static str,
+    pattern: PathBuf,
+    description: String,
+}
+
+/// 动态探测行（对标 dev.sh 中经 owner 命令解析路径后 safe_clean 的行）。
+///
+/// 仅移植**路径探测 + safe_clean 分支**；owner 命令删除汇（npm cache
+/// clean --force、uv cache prune、corepack cache clean、pnpm store prune、
+/// pip cache purge）需要"变更根可机器读出、dry-run 与真实共享同一候选
+/// 计划、部分失败可观察"契约，留待独立子片。
+fn dynamic_entries() -> Vec<ScanEntry> {
+    let mut rows = Vec::new();
+
+    // npm 残留目录行（对标 clean_dev_npm）：默认路径无条件；自定义路径
+    // 在探测成功且与默认规范化后不同时追加。
+    let npm_residual: &[(&str, &str)] = &[
+        ("_cacache/*", "npm cache directory"),
+        ("_npx/*", "npm npx cache"),
+        ("_logs/*", "npm logs"),
+        ("_prebuilds/*", "npm prebuilds"),
+    ];
+    let (npm_cache_path, npm_custom) = probe::npm_cache_path();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let npm_default = PathBuf::from(&home).join(".npm");
+    for (sub, desc) in npm_residual {
+        rows.push(ScanEntry {
+            family: "dev_frontend",
+            pattern: npm_default.join(sub),
+            description: desc.to_string(),
+        });
+    }
+    if npm_custom {
+        // 对标规范化去重：真实路径相同则不再重复清理。
+        if probe::normalize_existing(&npm_cache_path.to_string_lossy())
+            != probe::normalize_existing(&npm_default.to_string_lossy())
+        {
+            for (sub, desc) in npm_residual {
+                rows.push(ScanEntry {
+                    family: "dev_frontend",
+                    pattern: npm_cache_path.join(sub),
+                    description: format!("{desc} (custom path)"),
+                });
+            }
+        }
+    }
+
+    // uv 回退行：owner 命令不可用时才走 safe_clean（对标 else 分支）。
+    if !probe::tool_available("uv", &["--version"]) {
+        rows.push(ScanEntry {
+            family: "dev_python",
+            pattern: probe::uv_default_cache_path().join("*"),
+            description: "uv cache".into(),
+        });
+    }
+
+    // corepack 回退行：不安全路径拒绝 + owner 命令不可用（对标 else 分支）。
+    if !probe::tool_available("corepack", &["--version"]) {
+        if let Some(corepack_path) = probe::corepack_cache_path() {
+            rows.push(ScanEntry {
+                family: "dev_frontend",
+                pattern: corepack_path.join("*"),
+                description: "Corepack cache".into(),
+            });
+        }
+    }
+
+    // mise 行：无条件 safe_clean（对标 clean_dev_mise 末行）。
+    rows.push(ScanEntry {
+        family: "dev_cloud",
+        pattern: probe::mise_cache_path().join("*"),
+        description: "mise cache".into(),
+    });
+
+    rows
+}
+
+/// 汇总静态目录与动态探测行。
+fn collect_entries() -> Vec<ScanEntry> {
+    let mut entries: Vec<ScanEntry> = catalog::full_catalog()
+        .into_iter()
+        .map(|entry| ScanEntry {
+            family: entry.family,
+            pattern: resolve_entry_path(&entry),
+            description: entry.description.to_string(),
+        })
+        .collect();
+    entries.extend(dynamic_entries());
+    entries
+}
+
 /// 只读扫描预览（对标 dry-run：`MOLE_DRY_RUN=1 ./mole clean`）。
 pub fn scan_preview() -> CleanPreview {
     let whitelist = whitelist::Whitelist::load();
     let mut groups = Vec::new();
 
-    for entry in catalog::full_catalog() {
-        let pattern = resolve_entry_path(&entry);
+    for entry in collect_entries() {
         let mut items = Vec::new();
         let mut skipped = 0usize;
         let mut total = 0u64;
 
-        for target in expand_glob(&pattern) {
+        for target in expand_glob(&entry.pattern) {
             let target_str = target.to_string_lossy().to_string();
             // 保护检查在扫描期同样执行：受保护/白名单路径永远不会出现在
             // 可清理列表（对标 _safe_clean_impl 的逐路径检查顺序）。
@@ -262,7 +355,7 @@ pub fn scan_preview() -> CleanPreview {
         }
 
         groups.push(CleanGroup {
-            description: entry.description.to_string(),
+            description: entry.description,
             family: catalog::family_label(entry.family).to_string(),
             items,
             total_size_bytes: total,
@@ -294,12 +387,11 @@ pub fn execute_clean(selected_groups: &[String], dry_run: bool) -> CleanExecuteR
 
     delete::log_session_start("clean");
 
-    for entry in catalog::full_catalog() {
-        if !selected_groups.iter().any(|s| s == entry.description) {
+    for entry in collect_entries() {
+        if !selected_groups.iter().any(|s| *s == entry.description) {
             continue;
         }
-        let pattern = resolve_entry_path(&entry);
-        for target in expand_glob(&pattern) {
+        for target in expand_glob(&entry.pattern) {
             let target_str = target.to_string_lossy().to_string();
             // Sink 复检：扫描与执行之间状态可能变化（对标 sink re-verify）。
             if let Some(reason) = skip_reason(&target_str, &whitelist) {

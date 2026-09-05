@@ -171,3 +171,30 @@
 
 - 74 个测试通过；新增：目录排除项锁定（混合状态存储/AI 会话）、描述唯一性、族标签覆盖、home_env 解析。
 - 真机冒烟：75 组扫描正常。
+
+---
+
+<a name="clean-深度清理3c-二"></a>
+## clean 深度清理（子模块 3c 第二片：owner 命令探测行）
+
+### 对标记录
+
+- 原代码：`lib/clean/dev.sh` 的 `clean_dev_npm`（npm config get cache + 自定义路径规范化去重）、`clean_uv_cache`（uv cache dir / else 回退）、`clean_corepack_cache`（COREPACK_HOME + 不安全路径拒绝 / else 回退）、`get_mise_cache_path`（MISE_CACHE_DIR → mise cache path → 默认）、`resolve_tool_home`（#1378 防污染校验）。
+- 实现：`clean/probe.rs` —— 探测输出校验（绝对路径、拒绝 `..`、控制字符、尾斜杠归一）+ 各工具路径解析 1:1。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| npm 残留目录行（默认路径） | 无条件 safe_clean | 相同（无条件） | 无行为变更 | — |
+| npm 自定义路径行 | 探测 + realpath 规范化去重后追加 "(custom path)" 行 | 相同 | 无行为变更 | canonicalize 对标 `cd && pwd -P` |
+| uv/corepack 回退行 | owner 命令不可用时 safe_clean | 相同（tool_available 判定） | 无行为变更 | — |
+| corepack 不安全路径拒绝 | `/`、`$HOME`、`~/Library` 拒绝 | 相同 | 无行为变更 | — |
+| mise 行 | 无条件 safe_clean（路径三级解析） | 相同 | 无行为变更 | — |
+| **owner 命令删除汇** | `npm cache clean --force`、`uv cache prune`、`corepack cache clean`、`pnpm store prune`、`pip cache purge`、`bun pm cache rm` | **未实现** | **暂缓** | AGENTS.md 契约：owner 命令作为删除汇必须"变更根可机器读出、dry-run 与真实共享同一候选计划、部分失败可观察"；需独立设计与子片。因此本机上若安装了这些工具，批量清空类动作（如 npm 缓存整体清空）暂由残留目录行以 Trash 方式覆盖 |
+| pnpm store 多二进制探测 | 逐 pnpm 二进制 store path + prune | 未实现 | **暂缓** | 同 owner 命令删除汇契约 |
+
+### 测试
+
+- 78 个测试通过：探测输出校验（绝对路径/`..`/控制字符/尾斜杠）、corepack 默认路径、npm 探测回退、路径规范化；保护层/删除/白名单既有测试无回归。
+- 真机冒烟：82 组（新增 npm 残留 4 行探测生效，npm cache directory 164.93 MB）。
