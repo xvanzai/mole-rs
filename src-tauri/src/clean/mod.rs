@@ -17,7 +17,7 @@
 
 mod catalog;
 mod probe;
-mod delete;
+pub(crate) mod delete;
 mod protect;
 mod protect_data;
 mod whitelist;

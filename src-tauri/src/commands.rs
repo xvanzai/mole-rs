@@ -1,5 +1,21 @@
 //! Tauri 命令层：薄封装，业务逻辑在 `status` / `core` 模块。
 
+pub mod purge {
+    use crate::purge::{PurgeScanResult};
+
+    /// 项目产物只读扫描（对标 `MOLE_TEST_NO_AUTH=1 ./mole purge --dry-run`）。
+    #[tauri::command]
+    pub fn purge_scan() -> PurgeScanResult {
+        crate::purge::scan()
+    }
+
+    /// 执行 purge：只接受本次扫描中出现的路径，sink 复检后走 Trash。
+    #[tauri::command]
+    pub fn purge_execute(selected_paths: Vec<String>, dry_run: bool) -> crate::clean::CleanExecuteResult {
+        crate::purge::execute(&selected_paths, dry_run)
+    }
+}
+
 pub mod clean {
     use crate::clean::{CleanExecuteResult, CleanPreview};
 

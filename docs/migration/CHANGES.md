@@ -221,3 +221,30 @@
 ### 测试
 
 - 83 个测试通过（新增 JSON 解析、usage 正则等价、蓝牙缩进解析含顶层节重置与空回退、bluetoothctl 解析）。
+
+---
+
+<a name="purge-项目清理"></a>
+## purge 项目清理（模块4，第一片：扫描 + dry-run + Trash 执行）
+
+### 对标记录
+
+- 原代码：`bin/purge.sh`（编排）、`lib/clean/project.sh`（2,549 行扫描管线）、`lib/clean/purge_shared.sh`（配置数据）。
+- 数据 1:1：PURGE_TARGETS（33 项）、PROJECT_INDICATORS/MONOREPO_INDICATORS、DEFAULT_PURGE_SEARCH_PATHS（含 `.codex/worktrees`、`.claude/worktrees` 显式容器）、CACHEDIR.TAG 签名、`~/.config/mole/purge_paths` 配置。
+- 管线 1:1：容器发现（默认路径 ∪ HOME 一级探针 ∪ 配置）→ 有界遍历（深度 1–6，目标命名即 prune，.git/Library/.Trash/Applications 不下钻，CACHEDIR.TAG 有效签名目录同目标）→ 每根独立过滤后才并入 → 嵌套折叠（字节序排序 + 前缀丢弃，对标 awk 管线）→ 物理包含校验（canonicalize 双侧）→ 保护谓词（bin/.NET、vendor/Composer、项目内 DerivedData）→ 活动分级（7 天，find -mtime -7 语义，fail-closed）→ 按项目父目录分组。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| 大小写去重 | /bin/pwd 取磁盘真实名（#1416） | canonicalize | 无行为变更 | getcwd 语义等价 |
+| fd/find 双引擎 | fd 优先，MO_USE_FIND 回退 | 单一有界遍历 | **实现差异（无行为差异）** | 遍历语义与 fd --prune 对齐（目标目录不下钻）；原生实现避免外部引擎差异 |
+| 扫描进度文件 purge_scanning | XDG 缓存目录状态文件 | 未实现 | **暂缓** | 供 TUI 实时进度条；GUI 用整段扫描结果渲染 |
+| 活动预算 _PURGE_ACTIVITY_DEADLINE_EPOCH | 整个分类 pass 共享 deadline | 每项 5s 预算 | **简化** | 原语义"预算耗尽不返回 old"已保留（fail-closed）；整体 deadline 后续并入 |
+| `mo purge --paths` 交互配置编辑 | 菜单写入配置文件 | 配置文件只读消费 | **暂缓** | 编辑 UI 后续补 |
+| 执行入口 | purge_target_activity_still_safe + safe_remove | execute() 内 sink 复检（包含性 + 保护 + 活动 old）+ Trash 删除 | 无行为变更（加强） | 复检项对齐 + 复用 clean 的 Trash/双日志 |
+
+### 测试
+
+- 90 个测试通过（新增：#1459 容器守卫、嵌套折叠、vendor/bin/DerivedData 分级、深度规则与单项目模式、CACHEDIR.TAG 签名、walk prune/排除、活动分级、路径消失=old）。
+- 真机冒烟：发现 1 个搜索根、0 产物（本机项目在 HOME 外，符合预期；自定义路径经配置文件支持）。

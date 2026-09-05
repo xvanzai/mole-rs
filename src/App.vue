@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import PagePlaceholder from "./components/PagePlaceholder.vue";
 import StatusPage from "./pages/StatusPage.vue";
 import CleanPage from "./pages/CleanPage.vue";
+import PurgePage from "./pages/PurgePage.vue";
 
 /**
  * 应用外壳：侧边导航 + 模块页面切换。
@@ -72,8 +73,9 @@ const modules: ModuleDef[] = [
     label: "项目清理",
     icon: "🗑️",
     origin: "Mole bin/purge.sh + lib/clean/project.sh",
-    status: "模块 4 · 待迁移",
+    status: "模块 4 · 已完成",
     description: "清理项目构建产物（node_modules、target、DerivedData 等）。",
+    implemented: true,
   },
   {
     id: "history",
@@ -125,6 +127,7 @@ const active = computed(
     <main class="content">
       <StatusPage v-if="activeId === 'status'" />
       <CleanPage v-else-if="activeId === 'clean'" />
+      <PurgePage v-else-if="activeId === 'purge'" />
       <PagePlaceholder v-else v-bind="active" />
     </main>
   </div>

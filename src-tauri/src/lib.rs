@@ -1,6 +1,7 @@
 mod clean;
 mod commands;
 mod core;
+mod purge;
 mod status;
 
 use core::units;
@@ -41,7 +42,9 @@ pub fn run() {
             format_bytes_bin_compact,
             commands::status::status_tick,
             commands::clean::clean_preview,
-            commands::clean::clean_execute
+            commands::clean::clean_execute,
+            commands::purge::purge_scan,
+            commands::purge::purge_execute
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
