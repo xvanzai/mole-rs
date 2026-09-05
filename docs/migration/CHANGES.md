@@ -110,3 +110,38 @@
 - 白名单：glob 语义（跨 `/`、字符类、负类）、父/子方向保护、系统路径拒绝、`//` 与 `~` 处理。
 - clean：glob 展开、测径（含符号链接跳过）、排除项锁定、保护前缀。
 - 真机冒烟（`#[ignore]`）：本机扫描 30 组、83.96 MB 可释放，白名单 default。
+
+---
+
+<a name="clean-深度清理3b"></a>
+## clean 深度清理（子模块 3b：完整保护层 + Trash 安全删除 + 双日志）
+
+### 对标记录
+
+- `should_protect_path`（app_protection.sh:357，7 层检查）1:1 移植：共享 home 状态根 → Codex 可重建缓存叶 → OrbStack → 关键词层（大小写变体）→ 系统 UI 关键缓存 → 容器 bundle ID 提取（Caches/tmp 放行）→ EDR 代理（nocasematch，锚定 /private/var/folders）→ E5RT 编译模型缓存 → 偏好/用户数据/高风险 denylist（逐条转译）→ 全路径 bundle 模式匹配 → 文件名级 `should_protect_data`。
+- 数据表（app_protection_data.sh）1:1 搬运：SYSTEM_CRITICAL_BUNDLES（118 项）、DATA_PROTECTED_BUNDLES（约 280 项）、ENDPOINT_SECURITY_BUNDLE_PREFIXES（9 项）。
+- `validate_path_for_deletion` + `_mole_is_critical_deletion_path`：绝对路径、`..` 组件、控制字符、符号链接目标与祖先链接重检、关键系统路径拒绝（拒绝臂分"仅精确"与"含子树"两类）。
+- `mole_delete` trash 模式：验证 → sink 复检 → 尺寸捕获 → Trash 路由（`trash` CLI → Finder AppleScript（路径经 argv 防逃逸）→ `~/.Trash` 直移）→ fail-closed（Trash 不可用绝不回退永久删除）。
+- 双日志 1:1：`operations.log`（`[ts] [clean] TRASHED path (KB)`，`MO_NO_OPLOG=1` 可禁用）+ `deletions.log`（TSV 取证日志）。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| `should_protect_path` 分层 | 7 层 case/regex | 同顺序 7 层（glob/前缀/大小写等价转译） | 无行为变更 | 测试锁定各层语义 |
+| 卸载模式分支（MOLE_UNINSTALL_MODE=1） | APPLE_UNINSTALLABLE_APPS 先放行 | 未实现 | **暂缓** | clean 不需要；uninstall 模块移植时补齐 |
+| Trash 路由 | trash CLI → Finder → sudo staging | trash CLI → Finder → ~/.Trash 直移 | **简化（仅用户级路径）** | 3b 范围为用户级缓存（无 sudo 需求）；特权路径 staging 属 uninstall/system 清理族，届时移植 |
+| MOLE_TEST_TRASH_DIR 测试缝 | 直移到指定目录 | 相同 | 无行为变更 | 单测据此验证删除语义 |
+| dry-run | 记录预览不删除 | 相同（status="dry-run"） | 无行为变更 | — |
+| 执行流程 | safe_clean 边扫边删 | **重扫后执行**：前端只传组描述（非路径），后端重新扫描 + sink 复检 | 加固 | 对标 "materialize only completed scans"：不消费陈旧预览；前端无法注入任意路径 |
+| 保护层对扫描的反馈 | 同一函数 | 相同（scan 与 execute 共用 skip_reason） | 无行为变更 | 3a 时 akd 组曾显示可清理；3b 完整层正确拦截（与原实现 step 7 行为一致） |
+
+### 编译/移植问题
+
+1. 关键路径拒绝臂语义：`/Users`、`/Library`、`/Applications` 是**仅精确匹配**（用户家目录可删），`/System`、`/bin` 等是**含子树**——首版混用导致合法路径被拒，已按原 case 语句逐臂区分。
+2. bash glob 锚定语义两处反例进入测试期望（`ClashX*` 不匹配中缀；`com.crowdstrike.*` 经文件名级检查保护任意位置的 EDR 缓存），按原行为修正测试。
+
+### 测试
+
+- 71 个测试通过：保护层各层（关键词/容器/EDR/E5RT/共享根/Codex 叶）、`should_protect_data` case 组、路径验证拒绝矩阵（含 `name..files` 合例外、Homebrew 子条目放行）、trash 直移 + 双日志 + dry-run 语义（MOLE_TEST_TRASH_DIR 缝）。
+- 真机 dry-run 全链路冒烟：30 项、0 删除、保护层正确拦截。

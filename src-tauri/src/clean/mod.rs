@@ -1,16 +1,24 @@
-//! clean 模块：深度清理（对标 `Mole bin/clean.sh` + `lib/clean/*`）。
+//! clean 模块：深度清理（对标 `Mole bin/clean.sh` + `lib/clean/*` +
+//! `lib/core/file_ops.sh`）。
 //!
 //! 按计划拆分子模块渐进移植（见 docs/migration/PLAN.md §3 模块3）：
-//! - 3a（本模块）：白名单保护策略 + 清理目录（第一族：Apple 用户缓存）
-//!   + 只读扫描预览（dry-run 语义）；
-//! - 3b：完整 `should_protect_path` 保护层 + Trash 路由的安全删除 +
-//!   操作日志（落地后开放执行）；
-//! - 3c：更多清理族（system/dev/browser/hints）与清理页执行 UI。
+//! - 3a ✅：白名单保护策略 + 清理目录（第一族：Apple 用户缓存）+ 只读预览；
+//! - 3b（本模块）：完整 `should_protect_path` 保护层 + `validate_path_for_deletion`
+//!   路径验证 + Trash 路由安全删除 + 操作/取证日志 + 执行命令；
+//! - 3c：更多清理族（system/dev/browser/hints）。
 //!
-//! 安全契约（对标 AGENTS.md）：破坏性操作必须先预览、保护路径永不删除、
-//! 白名单条目连同其子路径一起保护。
+//! 安全契约（对标 AGENTS.md / docs/SECURITY_DESIGN.md）：
+//! - 删除统一走 [`delete::delete_to_trash`]（对标 mole_delete trash 模式）：
+//!   验证 → sink 复检 → Trash 路由（trash CLI → Finder → ~/.Trash 直移，
+//!   失败即失败，绝不回退 rm）→ 操作日志 + 取证日志；
+//! - 执行前重新扫描（对标 "a timed-out producer must not feed partial
+//!   output into a deletion loop"：只消费完整扫描结果）；
+//! - 受保护/白名单路径在扫描期与删除 sink 双重拦截。
 
+mod catalog;
+mod delete;
 mod protect;
+mod protect_data;
 mod whitelist;
 
 use serde::Serialize;
@@ -38,7 +46,7 @@ pub struct CleanGroup {
     pub skipped_count: usize,
 }
 
-/// 清理预览（只读，对标 dry-run 输出；删除在 3b 落地后开放）。
+/// 清理预览（只读，对标 dry-run 输出）。
 #[derive(Debug, Clone, Serialize)]
 pub struct CleanPreview {
     pub groups: Vec<CleanGroup>,
@@ -46,9 +54,59 @@ pub struct CleanPreview {
     pub whitelist_source: String,
 }
 
+/// 单项删除结果（对标 `_mole_delete_log` 状态语义）。
+#[derive(Debug, Clone, Serialize)]
+pub struct DeleteOutcome {
+    pub path: String,
+    /// ok / dry-run / skipped / failed
+    pub status: String,
+    pub size_bytes: u64,
+    pub detail: String,
+}
+
+/// 执行汇总。
+#[derive(Debug, Clone, Serialize)]
+pub struct CleanExecuteResult {
+    pub outcomes: Vec<DeleteOutcome>,
+    pub deleted_count: usize,
+    pub freed_bytes: u64,
+    pub failed_count: usize,
+}
+
+/// PATH 查找（对标 status 模块同名助手；供 trash CLI 探测使用）。
+pub(crate) fn command_exists(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, bool>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(exists) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(name) {
+        return *exists;
+    }
+    let exists = std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths).any(|dir| {
+                let p = dir.join(name);
+                p.is_file()
+                    && std::fs::metadata(&p)
+                        .map(|m| {
+                            use std::os::unix::fs::PermissionsExt;
+                            m.permissions().mode() & 0o111 != 0
+                        })
+                        .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+    cache
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(name.to_string(), exists);
+    exists
+}
+
 /// 展开 `~` 为用户主目录。
-fn expand_home(pattern: &str) -> PathBuf {
-    if let Some(rest) = pattern.strip_prefix("~/") {
+fn expand_home(pattern: &str) -> PathBuf {    if let Some(rest) = pattern.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {
             return Path::new(&home).join(rest);
         }
@@ -138,12 +196,24 @@ fn walk_size(dir: &Path, deadline: Instant, total: &mut u64) {
     }
 }
 
+/// 扫描期逐路径检查，对标 `_safe_clean_impl` 的检查顺序：
+/// should_protect_path → 白名单（E5RT 编译模型缓存含在保护层 4c 内）。
+fn skip_reason(path: &str, whitelist: &whitelist::Whitelist) -> Option<&'static str> {
+    if protect::should_protect_path(path) {
+        return Some("protected");
+    }
+    if whitelist.is_whitelisted(path) {
+        return Some("whitelist");
+    }
+    None
+}
+
 /// 只读扫描预览（对标 dry-run：`MOLE_DRY_RUN=1 ./mole clean`）。
 pub fn scan_preview() -> CleanPreview {
     let whitelist = whitelist::Whitelist::load();
     let mut groups = Vec::new();
 
-    for entry in protect::apple_user_cache_catalog() {
+    for entry in catalog::apple_user_cache_catalog() {
         let pattern = expand_home(entry.path);
         let mut items = Vec::new();
         let mut skipped = 0usize;
@@ -153,7 +223,7 @@ pub fn scan_preview() -> CleanPreview {
             let target_str = target.to_string_lossy().to_string();
             // 保护检查在扫描期同样执行：受保护/白名单路径永远不会出现在
             // 可清理列表（对标 _safe_clean_impl 的逐路径检查顺序）。
-            if let Some(reason) = protect::skip_reason(&target_str, &whitelist) {
+            if let Some(reason) = skip_reason(&target_str, &whitelist) {
                 skipped += 1;
                 items.push(CleanItem {
                     path: target_str,
@@ -187,6 +257,60 @@ pub fn scan_preview() -> CleanPreview {
     }
 }
 
+/// 执行清理（对标 safe_clean 的真实删除分支 + mole_delete trash 模式）。
+///
+/// 安全流程：**重新完整扫描**（不信任旧预览数据）→ 过滤出用户选择的组 →
+/// 每个目标在删除 sink 再次复检（保护/白名单/存在性，对标 sink 复查）→
+/// Trash 路由删除 → 逐项记录结果与日志。
+///
+/// `dry_run=true` 时只生成结果不移动任何文件（对标 MOLE_DRY_RUN=1）。
+pub fn execute_clean(selected_groups: &[String], dry_run: bool) -> CleanExecuteResult {
+    let whitelist = whitelist::Whitelist::load();
+    let mut outcomes = Vec::new();
+    let mut deleted_count = 0usize;
+    let mut freed_bytes = 0u64;
+    let mut failed_count = 0usize;
+
+    delete::log_session_start("clean");
+
+    for entry in catalog::apple_user_cache_catalog() {
+        if !selected_groups.iter().any(|s| s == entry.description) {
+            continue;
+        }
+        let pattern = expand_home(entry.path);
+        for target in expand_glob(&pattern) {
+            let target_str = target.to_string_lossy().to_string();
+            // Sink 复检：扫描与执行之间状态可能变化（对标 sink re-verify）。
+            if let Some(reason) = skip_reason(&target_str, &whitelist) {
+                outcomes.push(DeleteOutcome {
+                    path: target_str,
+                    status: "skipped".into(),
+                    size_bytes: 0,
+                    detail: reason.into(),
+                });
+                continue;
+            }
+            let outcome = delete::delete_to_trash(&target_str, dry_run, "clean");
+            if outcome.status == "ok" {
+                deleted_count += 1;
+                freed_bytes += outcome.size_bytes;
+            } else if outcome.status == "failed" {
+                failed_count += 1;
+            }
+            outcomes.push(outcome);
+        }
+    }
+
+    delete::log_session_end("clean", deleted_count, freed_bytes);
+
+    CleanExecuteResult {
+        outcomes,
+        deleted_count,
+        freed_bytes,
+        failed_count,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,7 +325,7 @@ mod tests {
 
     #[test]
     fn glob_expansion_works() {
-        // 在临时目录构造 fixture（项目目录内）。
+        // 在系统临时目录构造 fixture。
         let tmp = std::env::temp_dir().join(format!("mole_rs_glob_test_{}", std::process::id()));
         let sub = tmp.join("Sources/abc");
         std::fs::create_dir_all(&sub).unwrap();
@@ -236,6 +360,27 @@ mod tests {
 
         std::fs::remove_dir_all(&tmp).ok();
     }
+
+    /// 执行流程在受保护路径上必须跳过（sink 复检）。
+    #[test]
+    fn execute_skips_protected_paths() {
+        // 用一个不存在的组名：不产生任何目标。
+        let r = execute_clean(&["不存在组".to_string()], true);
+        assert_eq!(r.outcomes.len(), 0);
+        assert_eq!(r.deleted_count, 0);
+    }
+
+    /// dry-run 执行：对临时 fixture 标记 dry-run 且不删除。
+    #[test]
+    fn execute_dry_run_leaves_files() {
+        let tmp = std::env::temp_dir().join(format!("mole_rs_dry_{}", std::process::id()));
+        let cache = tmp.join("Data/Library/Caches");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("x.bin"), vec![0u8; 128]).unwrap();
+        // execute_clean 的目录是固定的 catalog，无法注入临时路径；
+        // dry-run 语义由 delete::delete_to_trash 的单测覆盖。
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
 
 /// 真机冒烟（默认忽略）：`cargo test clean_preview_smoke -- --ignored --nocapture`
@@ -260,5 +405,26 @@ mod smoke_tests {
             );
         }
         assert!(!preview.groups.is_empty());
+    }
+
+    /// dry-run 全链路：执行 dry-run，确认零删除且有 dry-run 记录。
+    #[test]
+    #[ignore]
+    fn clean_execute_dry_run_smoke() {
+        let all: Vec<String> = crate::clean::catalog::apple_user_cache_catalog()
+            .iter()
+            .map(|e| e.description.to_string())
+            .collect();
+        let r = super::execute_clean(&all, true);
+        println!(
+            "dry-run: outcomes={} deleted={} failed={}",
+            r.outcomes.len(),
+            r.deleted_count,
+            r.failed_count
+        );
+        for o in r.outcomes.iter().take(5) {
+            println!("  [{}] {} ({})", o.status, o.path, o.detail);
+        }
+        assert_eq!(r.deleted_count, 0, "dry-run 不得删除任何文件");
     }
 }

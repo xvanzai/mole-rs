@@ -29,12 +29,36 @@ interface CleanPreview {
 const preview = ref<CleanPreview | null>(null);
 const loading = ref(true);
 const error = ref("");
+/** 选中的组描述（对标勾选清理项）；默认全选有可释放空间的组。 */
+const selected = ref<Set<string>>(new Set());
+const executing = ref(false);
+const result = ref<ExecuteResult | null>(null);
+
+interface DeleteOutcome {
+  path: string;
+  status: string;
+  size_bytes: number;
+  detail: string;
+}
+interface ExecuteResult {
+  outcomes: DeleteOutcome[];
+  deleted_count: number;
+  freed_bytes: number;
+  failed_count: number;
+}
 
 async function load() {
   loading.value = true;
   error.value = "";
   try {
     preview.value = await invoke<CleanPreview>("clean_preview");
+    // 默认全选有可释放空间的组。
+    selected.value = new Set(
+      (preview.value?.groups ?? [])
+        .filter((g) => g.total_size_bytes > 0)
+        .map((g) => g.description),
+    );
+    result.value = null;
   } catch (e) {
     error.value = String(e);
   } finally {
@@ -42,6 +66,39 @@ async function load() {
   }
 }
 onMounted(load);
+
+/** 执行清理：确认对话框 → 后端重扫 + sink 复检 + Trash 删除。 */
+async function execute() {
+  if (!selected.value.size) return;
+  const ok = window.confirm(
+    `将把 ${selected.value.size} 组缓存移入废纸篓（可恢复）。\n` +
+      "执行前会重新扫描并在删除时再次校验保护与白名单。继续？",
+  );
+  if (!ok) return;
+  executing.value = true;
+  error.value = "";
+  try {
+    result.value = await invoke<ExecuteResult>("clean_execute", {
+      selectedGroups: [...selected.value],
+      dryRun: false,
+    });
+    await load(); // 执行后刷新扫描结果
+  } catch (e) {
+    error.value = String(e);
+  } finally {
+    executing.value = false;
+  }
+}
+
+function toggleGroup(desc: string) {
+  const next = new Set(selected.value);
+  if (next.has(desc)) {
+    next.delete(desc);
+  } else {
+    next.add(desc);
+  }
+  selected.value = next;
+}
 
 const totalText = computed(() => {
   if (!preview.value) return "…";
@@ -67,18 +124,32 @@ function mb(bytes: number): string {
       <div>
         <h2>深度清理</h2>
         <p class="sub">
-          Apple 系统缓存族（对标 <code>clean_app_caches</code>）。执行删除将在
-          下一子模块（保护层 + 回收站路由）落地后开放。
+          Apple 系统缓存族（对标 <code>clean_app_caches</code>）。删除统一走
+          回收站（可恢复），受保护与白名单路径双重拦截。
         </p>
       </div>
       <div class="total">
         <span class="num">{{ totalText }}</span>
         <span class="label">可释放</span>
       </div>
-      <button class="rescan" :disabled="loading" @click="load">
+      <button class="rescan" :disabled="loading || executing" @click="load">
         {{ loading ? "扫描中…" : "重新扫描" }}
       </button>
+      <button
+        class="execute"
+        :disabled="loading || executing || !selected.size"
+        @click="execute"
+      >
+        {{ executing ? "清理中…" : `清理选中（${selected.size}）` }}
+      </button>
     </header>
+
+    <div v-if="result" class="result" :class="{ ok: result.failed_count === 0 }">
+      已移入废纸篓 {{ result.deleted_count }} 项，释放
+      {{ mb(result.freed_bytes) }}
+      <template v-if="result.failed_count">，失败 {{ result.failed_count }} 项</template>。
+      日志见 <code>~/Library/Logs/mole/operations.log</code>。
+    </div>
 
     <p v-if="error" class="error">{{ error }}</p>
 
@@ -93,6 +164,13 @@ function mb(bytes: number): string {
         @click="expanded = expanded === g.description ? null : g.description"
       >
         <div class="row">
+          <label class="check" @click.stop>
+            <input
+              type="checkbox"
+              :checked="selected.has(g.description)"
+              @change="toggleGroup(g.description)"
+            />
+          </label>
           <span class="desc">{{ g.description }}</span>
           <span class="size">{{ mb(g.total_size_bytes) }}</span>
         </div>
@@ -159,15 +237,51 @@ function mb(bytes: number): string {
   padding: 7px 14px;
   border: none;
   border-radius: 8px;
-  background: var(--accent);
-  color: #fff;
+  background: var(--surface-inset);
+  color: var(--text);
   font-size: 13px;
   cursor: pointer;
 }
 
-.rescan:disabled {
-  opacity: 0.6;
+.rescan:disabled,
+.execute:disabled {
+  opacity: 0.5;
   cursor: default;
+}
+
+.execute {
+  align-self: center;
+  padding: 7px 14px;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.result {
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: var(--surface-inset);
+  border: 1px solid var(--border);
+  font-size: 12.5px;
+}
+
+.result.ok {
+  border-color: var(--ok);
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.check input {
+  accent-color: var(--accent);
 }
 
 .error {

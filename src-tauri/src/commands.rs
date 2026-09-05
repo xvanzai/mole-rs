@@ -1,13 +1,20 @@
 //! Tauri 命令层：薄封装，业务逻辑在 `status` / `core` 模块。
 
 pub mod clean {
-    use crate::clean::CleanPreview;
+    use crate::clean::{CleanExecuteResult, CleanPreview};
 
     /// 只读清理预览（对标 `MOLE_DRY_RUN=1 ./mole clean`）。
-    /// 删除执行在 3b 子模块（完整保护层 + Trash 路由）落地后开放。
     #[tauri::command]
     pub fn clean_preview() -> CleanPreview {
         crate::clean::scan_preview()
+    }
+
+    /// 执行清理：按用户选择的组（对标 safe_clean 的组描述）删除到回收站。
+    /// `dry_run=true` 时只产出结果不移动文件。
+    /// 后端会重新扫描并在删除 sink 复检保护/白名单，不信任前端传来的路径。
+    #[tauri::command]
+    pub fn clean_execute(selected_groups: Vec<String>, dry_run: bool) -> CleanExecuteResult {
+        crate::clean::execute_clean(&selected_groups, dry_run)
     }
 }
 
