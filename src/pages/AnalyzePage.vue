@@ -8,6 +8,7 @@
  */
 import { computed, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { confirm } from "../composables/confirm";
 
 interface DirEntry {
   name: string;
@@ -86,8 +87,9 @@ function toggle(p: string) {
 
 async function removeSelected() {
   if (!selected.value.size || !scan.value) return;
-  const ok = window.confirm(
-    `将把 ${selected.value.size} 项移入废纸篓（可恢复）。继续？`,
+  const ok = await confirm(
+    `将把 ${selected.value.size} 项移入废纸篓（可恢复）。`,
+    { title: "删除所选条目", confirmText: "移入废纸篓" },
   );
   if (!ok) return;
   executing.value = true;

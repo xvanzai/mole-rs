@@ -8,6 +8,7 @@
  */
 import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { confirm } from "../composables/confirm";
 
 interface PurgeArtifact {
   path: string;
@@ -67,9 +68,10 @@ onMounted(load);
 
 async function execute() {
   if (!selected.value.size) return;
-  const ok = window.confirm(
+  const ok = await confirm(
     `将把 ${selected.value.size} 个构建产物移入废纸篓（可恢复）。\n` +
-      "执行前会重新扫描并复核保护规则与活动状态。继续？",
+      "执行前会重新扫描并复核保护规则与活动状态。",
+    { title: "执行项目清理", confirmText: "开始清理" },
   );
   if (!ok) return;
   executing.value = true;

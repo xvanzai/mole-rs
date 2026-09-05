@@ -345,6 +345,17 @@
    Rust `entry.file_type()` 不跟踪链接 → `is_dir()==false` → 整只跳过
    （42 个应用、protected=0）；原实现 `find -iname "*.app"` + `-d` 检查
    （`-d` 跟踪链接）会列出 Safari 且标记 🛡。
+3. **所有删除操作永远无法确认执行**：Clean/Purge/Analyze 三页的执行
+   按钮依赖 `window.confirm`，而 Tauri 的 WKWebView（wry 0.55.1）未实现
+   WKUIDelegate 的 JS 对话框方法（源码无
+   `runJavaScriptConfirmPanelWithMessage`），WebKit 对未实现的对话框一律
+   按"用户取消"处理 → `confirm()` 恒返回 false → 执行函数静默返回。
+
+### 变更前后对照（3：确认对话框）
+
+| 项 | 变更前 | 变更后 | 原因 |
+|----|-------|-------|------|
+| 删除前确认 | `window.confirm(...)`（恒 false，删除永不可达） | 应用内模态确认框 `composables/confirm.ts` + `ConfirmDialog.vue`（Promise 风格 `await confirm(msg)`） | 对标终端 `mo` 删除前 y/N 确认的契约；wry 未实现原生对话框，属平台差异 |
 
 ### 变更前后对照
 
@@ -362,7 +373,8 @@
   全部出现在后台线程。
 - `cargo test` 104 通过；真机冒烟 7 项通过；卸载清单 42→44 个应用、
   Safari 正确标记 🛡（protected=1）。
-- 前端 `vue-tsc` + `vite build` 通过；13 个 invoke 命令名与注册表一一对应。
+- 前端 `vue-tsc` + `vite build` 通过；13 个 invoke 命令名与注册表一一对应；
+  确认对话框接入 Clean/Purge/Analyze 三个执行入口。
 
 ---
 

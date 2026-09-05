@@ -8,6 +8,7 @@
  */
 import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { confirm } from "../composables/confirm";
 
 interface CleanItem {
   path: string;
@@ -71,9 +72,10 @@ onMounted(load);
 /** 执行清理：确认对话框 → 后端重扫 + sink 复检 + Trash 删除。 */
 async function execute() {
   if (!selected.value.size) return;
-  const ok = window.confirm(
+  const ok = await confirm(
     `将把 ${selected.value.size} 组缓存移入废纸篓（可恢复）。\n` +
-      "执行前会重新扫描并在删除时再次校验保护与白名单。继续？",
+      "执行前会重新扫描并在删除时再次校验保护与白名单。",
+    { title: "执行深度清理", confirmText: "开始清理" },
   );
   if (!ok) return;
   executing.value = true;

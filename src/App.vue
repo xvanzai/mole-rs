@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import PagePlaceholder from "./components/PagePlaceholder.vue";
+import ConfirmDialog from "./components/ConfirmDialog.vue";
 import StatusPage from "./pages/StatusPage.vue";
 import CleanPage from "./pages/CleanPage.vue";
 import PurgePage from "./pages/PurgePage.vue";
@@ -142,6 +143,7 @@ const active = computed(
       <OptimizePage v-else-if="activeId === 'optimize'" />
       <PagePlaceholder v-else v-bind="active" />
     </main>
+    <ConfirmDialog />
   </div>
 </template>
 
