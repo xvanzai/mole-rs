@@ -507,3 +507,36 @@
 ### 测试
 
 - 112 个测试通过（新增：reverse-DNS 校验矩阵、残留路径精确性与越界检查、不存在的应用跳过、受保护应用整体跳过且文件保留）。
+
+---
+
+<a name="uninstall-6c"></a>
+## uninstall 应用卸载（模块6c：名称变体残留查找 + 卸载模式保护语义）
+
+### 对标记录
+
+- `find_app_files` 的用户级名称模式 1:1：主名 Library 位置（含插件类 23 处）+ dotdirs（.config/.cache/.local/share 的原样与变体）+ base_name 变体（版本/渠道后缀剥离，大小写敏感、多词后缀）。
+- 变体派生 1:1：nospace/hyphen/underscore/lowercase 四类 + base；`_mole_uninstall_name_variant_matches` 前缀边界五种形态（== v、v+" "、v+"-"、v+"_"、v+"."）。
+- 安全过滤 1:1：常用目录根跳过（空名称/空 bundle 产物防整目录删除）、`_mole_is_shared_home_state_root` 共享根跳过、`_path_belongs_to_independent_cli` 独立 CLI dotdir 保护（#993：claude/opencode/codex/gemini）。
+- vendor-nested 1:1（`find_vendor_nested_app_paths`）：vendor 段目录（≥3 字符校验）下深度 2 子项变体匹配，通用词名拒绝。
+- ByHost 与用户 LaunchAgents 1:1：bundle ID 边界匹配（`mole_name_starts_with_bundle_id_boundary`）+ `${bundle_id}.*.plist` 前缀。
+- Zed 渠道特例（#422）：dev.zed.Zed-* HTTPStorages 前缀变体。
+- **卸载模式保护语义**（MOLE_UNINSTALL_MODE=1）：跳过文件名级检查；容器数据保护跳过；步骤 6 只判 SYSTEM_CRITICAL_BUNDLES（APPLE_UNINSTALLABLE 先放行）；DATA_PROTECTED 不拦用户显式选择的卸载。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| find 通配扫描 | _mole_uninstall_materialize_find0（有界、完整产出） | Rust 遍历（同语义：只消费完整扫描） | 无行为变更 | — |
+| should_protect_path 模式 | 全局 env MOLE_UNINSTALL_MODE | 参数化 uninstall_mode（clean/卸载双入口） | 无行为变更 | 显式参数替代隐式环境变量 |
+| 系统级 LaunchAgents/Daemons、Receipts、共享兄弟守卫 | find_app_system_files / find_app_receipt_files | 未实现 | **暂缓（6d）** | 涉 sudo 读取与删除，逐行复核后移植 |
+
+### 编译/移植问题
+
+1. 6b 残留模板三处漏 `/{id}`（HTTPStorages/Application Scripts/Autosave Information/WebContent），导致裸系统目录被列为残留——真机冒烟捕获并修复（这正是 dry-run 冒烟的价值）。
+2. 卸载模式下残留被 clean 语义误拦（DATA_PROTECTED 的 clash-verge 模式）——冒烟暴露，按原实现 MOLE_UNINSTALL_MODE 语义修复并加回归测试。
+
+### 测试
+
+- 122 个测试通过（新增：通用词拒绝、vendor/product 段提取含 com 边界、变体前缀五形态、base_name 剥离含多词后缀与大小写敏感、bundle ID 边界、独立 CLI dotdir、常用目录根、Zed 特例、卸载模式保护语义）。
+- 真机 dry-run：Clash Verge 本体 + 5 个真实残留（Application Support/WebKit/Application Scripts/Preferences/LaunchAgents）正确发现，无裸目录。

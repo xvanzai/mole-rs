@@ -337,7 +337,16 @@ fn move_to_trash(path: &str) -> Result<(), String> {
 /// 尺寸捕获 → Trash 路由 → 双日志。
 ///
 /// `command_name` 写入操作日志（对标 MOLE_CURRENT_COMMAND）。
+/// 卸载模式删除（对标 MOLE_UNINSTALL_MODE=1 下的保护语义）。
+pub fn delete_to_trash_uninstall(path: &str, dry_run: bool, command_name: &str) -> super::DeleteOutcome {
+    delete_to_trash_inner(path, dry_run, command_name, true)
+}
+
 pub fn delete_to_trash(path: &str, dry_run: bool, command_name: &str) -> super::DeleteOutcome {
+    delete_to_trash_inner(path, dry_run, command_name, false)
+}
+
+fn delete_to_trash_inner(path: &str, dry_run: bool, command_name: &str, uninstall_mode: bool) -> super::DeleteOutcome {
     let size_bytes = super::path_size_with_deadline(
         Path::new(path),
         std::time::Instant::now() + std::time::Duration::from_secs(2),
@@ -360,7 +369,12 @@ pub fn delete_to_trash(path: &str, dry_run: bool, command_name: &str) -> super::
     }
 
     // Sink 复检（对标 safe_clean 在删除点的复查语义；E5RT 含在保护层内）。
-    if protect::should_protect_path(path) {
+    let protected = if uninstall_mode {
+        protect::should_protect_path_uninstall(path)
+    } else {
+        protect::should_protect_path(path)
+    };
+    if protected {
         delete_log("trash", &size_kb, "rejected", path);
         log_operation(command_name, "SKIPPED", path, "protected");
         return super::DeleteOutcome {

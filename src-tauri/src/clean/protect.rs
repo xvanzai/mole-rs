@@ -198,7 +198,7 @@ pub fn holds_compiled_model_cache(path: &str) -> bool {
 
 /// 对标 `_mole_is_shared_home_state_root`：共享 XDG 根本身保护，
 /// app 专属子路径（如 ~/.config/zed）放行。
-fn is_shared_home_state_root(path: &str) -> bool {
+pub(crate) fn is_shared_home_state_root(path: &str) -> bool {
     let home = home();
     let stripped = path.strip_prefix(&home).unwrap_or(path);
     let stripped = stripped.trim_end_matches('/');
@@ -265,6 +265,16 @@ fn container_bundle_id(path: &str) -> Option<String> {
 /// 完整移植 `should_protect_path`（clean 模式）。
 /// 返回 true = 受保护（不可删除）。
 pub fn should_protect_path(path: &str) -> bool {
+    should_protect_path_inner(path, false)
+}
+
+/// 卸载模式（对标 MOLE_UNINSTALL_MODE=1）：跳过文件名级检查，
+/// DATA_PROTECTED 不拦（卸载前另有 should_protect_from_uninstall 前置判断）。
+pub fn should_protect_path_uninstall(path: &str) -> bool {
+    should_protect_path_inner(path, true)
+}
+
+fn should_protect_path_inner(path: &str, uninstall_mode: bool) -> bool {
     if path.is_empty() {
         return false;
     }
@@ -338,7 +348,7 @@ pub fn should_protect_path(path: &str) -> bool {
     if let Some(bundle_id) = container_bundle_id(path) {
         if path.contains("/Data/Library/Caches/") || path.contains("/Data/tmp/") {
             container_cache_path = true;
-        } else if should_protect_data(&bundle_id) {
+        } else if !uninstall_mode && should_protect_data(&bundle_id) {
             return true;
         }
     }
@@ -519,15 +529,31 @@ pub fn should_protect_path(path: &str) -> bool {
 
     // 6. 全路径对保护 bundle 模式匹配（容器 Caches/tmp 已在 step 3 处理）。
     if !container_cache_path && !codex_rebuildable {
-        for pattern in SYSTEM_CRITICAL_BUNDLES.iter().chain(DATA_PROTECTED_BUNDLES.iter()) {
-            if bundle_matches_pattern(path, pattern) {
+        if uninstall_mode {
+            // 对标 MOLE_UNINSTALL_MODE=1：Apple 可卸载先放行，系统关键保护；
+            // DATA_PROTECTED 不拦（用户显式选择卸载）。
+            for pattern in crate::clean::protect_data::APPLE_UNINSTALLABLE_APPS {
+                if bundle_matches_pattern(path, pattern) {
+                    return false;
+                }
+            }
+            for pattern in SYSTEM_CRITICAL_BUNDLES {
+                if bundle_matches_pattern(path, pattern) {
+                    return true;
+                }
+            }
+        } else {
+            for pattern in SYSTEM_CRITICAL_BUNDLES.iter().chain(DATA_PROTECTED_BUNDLES.iter()) {
+                if bundle_matches_pattern(path, pattern) {
+                    return true;
+                }
+            }
+            // 7. 文件名级检查（卸载模式跳过——对标原实现注释
+            // "Skip in uninstall mode - user explicitly chose to remove this app"）。
+            let filename = path.rsplit('/').next().unwrap_or("");
+            if !filename.is_empty() && should_protect_data(filename) {
                 return true;
             }
-        }
-        // 7. 文件名级检查。
-        let filename = path.rsplit('/').next().unwrap_or("");
-        if !filename.is_empty() && should_protect_data(filename) {
-            return true;
         }
     }
 
