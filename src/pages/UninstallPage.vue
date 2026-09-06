@@ -25,10 +25,13 @@ const apps = ref<AppInfo[]>([]);
 const loading = ref(false);
 const error = ref("");
 const query = ref("");
+const selected = ref<Set<string>>(new Set());
+const executing = ref(false);
 /** 是否已开始（不自动扫描，由用户显式触发）。 */
 const started = ref(false);
 
 async function load() {
+  selected.value = new Set();
   loading.value = true;
   error.value = "";
   try {
@@ -55,6 +58,38 @@ const filtered = computed(() => {
   );
 });
 
+async function uninstallSelected() {
+  const chosen = apps.value.filter((a) => selected.value.has(a.path) && !a.protected);
+  if (!chosen.length) return;
+  const ok = window.confirm(
+    `将把 ${chosen.length} 个应用（含精确 bundle ID 残留）移入废纸篓（可恢复）。继续？`,
+  );
+  if (!ok) return;
+  executing.value = true;
+  error.value = "";
+  try {
+    for (const a of chosen) {
+      await invoke("uninstall_app", {
+        appPath: a.path,
+        bundleId: a.bundle_id,
+        dryRun: false,
+      });
+    }
+    await load();
+  } catch (e) {
+    error.value = String(e);
+  } finally {
+    executing.value = false;
+  }
+}
+
+function toggle(path: string) {
+  const next = new Set(selected.value);
+  if (next.has(path)) next.delete(path);
+  else next.add(path);
+  selected.value = next;
+}
+
 const totalSize = computed(() =>
   apps.value.reduce((acc, a) => acc + a.size_bytes, 0),
 );
@@ -73,11 +108,18 @@ function mb(bytes: number): string {
       <div>
         <h2>应用卸载</h2>
         <p class="sub" v-if="started || apps.length">
-          {{ apps.length }} 个应用 · 共 {{ mb(totalSize) }}。删除与残留清理将在
-          下一子片开放（需逐行移植 find_app_files 安全汇）。
+          {{ apps.length }} 个应用 · 共 {{ mb(totalSize) }}。卸载走回收站
+          （应用本体 + 精确 bundle ID 残留）。
         </p>
         <p class="sub" v-else>应用清单与保护分级（只读，对标 <code>mo uninstall</code>）。</p>
       </div>
+      <button
+        class="execute"
+        :disabled="executing || !selected.size"
+        @click="uninstallSelected"
+      >
+        {{ executing ? "卸载中…" : `卸载选中（${selected.size}）` }}
+      </button>
       <input v-model="query" class="search" placeholder="搜索应用或 Bundle ID…" />
       <button class="rescan" :disabled="loading" @click="load">
         {{ loading ? "扫描中…" : "重新扫描" }}
@@ -100,6 +142,14 @@ function mb(bytes: number): string {
 
     <div class="list">
       <div v-for="a in filtered" :key="a.path" class="app" :title="a.path">
+        <label class="check" @click.stop>
+          <input
+            type="checkbox"
+            :disabled="a.protected"
+            :checked="selected.has(a.path)"
+            @change="toggle(a.path)"
+          />
+        </label>
         <span class="name">{{ a.name }}</span>
         <span class="ver">{{ a.version || "—" }}</span>
         <code class="bundle">{{ a.bundle_id }}</code>
@@ -149,6 +199,33 @@ function mb(bytes: number): string {
   color: var(--text);
   font-size: 13px;
   width: 220px;
+}
+
+.execute {
+  padding: 7px 14px;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.execute:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.check input {
+  accent-color: var(--accent);
 }
 
 .rescan {

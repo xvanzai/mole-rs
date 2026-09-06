@@ -481,3 +481,29 @@
 ### 测试
 
 - 108 个测试通过（新增：白名单行校验矩阵、purge 路径校验、配置往返一致）。
+
+---
+
+<a name="uninstall-6b"></a>
+## uninstall 应用卸载（模块6b：应用本体 + 精确 bundle ID 残留删除）
+
+### 对标记录
+
+- `mole_is_reverse_dns_bundle_id`（base.sh:795）1:1：至少两段、每段字母数字开头、允许内部连字符。
+- `find_app_files` 的 bundle ID 字面路径集合 1:1（reverse-DNS 校验后）：Application Support、Caches、Logs、Saved Application State/{id}.savedState、Containers、WebKit（含 WebContent 子目录）、HTTPStorages（含 .binarycookies）、Cookies/{id}.binarycookies、Application Scripts、Input Methods/{id}.app、Autosave Information、SyncedPreferences/{id}.plist。
+- 卸载模式保护前置：should_protect_from_uninstall 拒绝系统关键应用（含其残留）。
+- 删除统一走 delete_to_trash（回收站可恢复）+ 双日志。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| 名称变体路径（nospace/hyphen/lowercase/base_name） | find_app_files 的 user_patterns 大集合 | 未实现 | **暂缓（6c）** | 名称变体命中宽，需连同共享兄弟守卫一起逐行复核 |
+| bundle leaf 推导（camel 边界规则） | 复杂派生 | 未实现 | **暂缓（6c）** | 需完整移植推导条件（≥8 字符、驼峰转换、显示名前缀） |
+| LaunchAgents/Daemons 扫描、Receipts、登录项 | 独立扫描族 | 未实现 | **暂缓（6c）** | 删除汇逐行复核 |
+| 共享 bundle ID 兄弟守卫 | /Volumes 副本、逆名、共享身份变体守卫 | 未实现 | **暂缓（6c）** | AGENTS.md 要求每个变体一条回归测试 |
+| 删除入口 | remove_file_list + 确认 | 单应用逐项 Trash | 无行为变更（保守子集） | 精确证据优先 |
+
+### 测试
+
+- 112 个测试通过（新增：reverse-DNS 校验矩阵、残留路径精确性与越界检查、不存在的应用跳过、受保护应用整体跳过且文件保留）。

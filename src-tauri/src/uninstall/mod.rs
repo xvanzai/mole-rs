@@ -289,7 +289,7 @@ pub fn list_apps() -> Vec<AppInfo> {
 }
 
 #[cfg(test)]
-mod tests {
+mod first_tests {
     use super::*;
 
     /// 对标 uninstall_resolve_bundle_id 的清洗语义。
@@ -352,5 +352,167 @@ mod smoke_tests {
             );
         }
         assert!(!apps.is_empty());
+    }
+}
+
+/// 对标 `mole_is_reverse_dns_bundle_id`：合法 reverse-DNS 校验
+/// （段以字母数字开头，允许内部连字符，至少两段）。
+pub fn is_reverse_dns_bundle_id(bundle_id: &str) -> bool {
+    if bundle_id.is_empty() || bundle_id == "unknown" {
+        return false;
+    }
+    let segment = |s: &str| {
+        let bytes = s.as_bytes();
+        !bytes.is_empty()
+            && bytes[0].is_ascii_alphanumeric()
+            && bytes
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || *b == b'-')
+    };
+    let parts: Vec<&str> = bundle_id.split('.').collect();
+    parts.len() >= 2 && parts.iter().all(|p| segment(p))
+}
+
+/// 对标 `find_app_files` 中 bundle_id 字面路径集合（reverse-DNS 校验后）。
+/// 仅精确 bundle ID 残留；名称变体路径、bundle leaf 推导、LaunchAgents、
+/// Receipts 与共享兄弟守卫留待 6c（逐行复核后移植）。
+fn bundle_id_residue_paths(bundle_id: &str) -> Vec<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    [
+        "Application Support/{id}", "Caches/{id}", "Logs/{id}",
+        "Saved Application State/{id}.savedState",
+        "Containers/{id}", "WebKit/{id}",
+        "WebKit/com.apple.WebKit.WebContent",
+        "HTTPStorages", "HTTPStorages/{id}.binarycookies",
+        "Cookies/{id}.binarycookies", "Application Scripts",
+        "Input Methods/{id}.app", "Autosave Information",
+        "SyncedPreferences/{id}.plist",
+    ]
+    .iter()
+    .map(|t| {
+        let expanded = t.replace("{id}", bundle_id);
+        format!("{home}/Library/{expanded}")
+    })
+    .collect()
+}
+
+/// 卸载一个应用（对标 uninstall 删除阶段）：前置校验（卸载模式保护、
+/// bundle ID 合法性）→ 应用本体 + 精确残留逐项 sink 复检 → Trash。
+pub fn uninstall_app(app_path: &str, bundle_id: &str, dry_run: bool) -> crate::clean::CleanExecuteResult {
+    let mut outcomes = Vec::new();
+    let mut deleted_count = 0usize;
+    let mut freed_bytes = 0u64;
+    let mut failed_count = 0usize;
+
+    crate::clean::delete::log_session_start("uninstall");
+
+    let mut targets: Vec<String> = Vec::new();
+    // 应用本体。
+    let path = Path::new(app_path);
+    if !path.exists() && !path.is_symlink() {
+        outcomes.push(crate::clean::DeleteOutcome {
+            path: app_path.to_string(),
+            status: "skipped".into(),
+            size_bytes: 0,
+            detail: "应用不存在".into(),
+        });
+        return crate::clean::CleanExecuteResult {
+            outcomes,
+            deleted_count,
+            freed_bytes,
+            failed_count,
+        };
+    }
+    targets.push(app_path.to_string());
+
+    // 精确残留（仅 reverse-DNS 校验通过的 bundle ID）。
+    if is_reverse_dns_bundle_id(bundle_id) {
+        for residue in bundle_id_residue_paths(bundle_id) {
+            let p = Path::new(&residue);
+            if p.exists() || p.is_symlink() {
+                targets.push(residue);
+            }
+        }
+    }
+
+    for target in targets {
+        // 卸载模式保护（对标 should_protect_from_uninstall 前置检查）。
+        if should_protect_from_uninstall(bundle_id) {
+            outcomes.push(crate::clean::DeleteOutcome {
+                path: target,
+                status: "skipped".into(),
+                size_bytes: 0,
+                detail: "uninstall-protected".into(),
+            });
+            continue;
+        }
+        let outcome = crate::clean::delete::delete_to_trash(&target, dry_run, "uninstall");
+        if outcome.status == "ok" {
+            deleted_count += 1;
+            freed_bytes += outcome.size_bytes;
+        } else if outcome.status == "failed" {
+            failed_count += 1;
+        }
+        outcomes.push(outcome);
+    }
+
+    crate::clean::delete::log_session_end("uninstall", deleted_count, freed_bytes);
+
+    crate::clean::CleanExecuteResult {
+        outcomes,
+        deleted_count,
+        freed_bytes,
+        failed_count,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 对标 mole_is_reverse_dns_bundle_id 用例。
+    #[test]
+    fn reverse_dns_validation() {
+        assert!(is_reverse_dns_bundle_id("com.example.app"));
+        assert!(is_reverse_dns_bundle_id("com.github.wez.wezterm"));
+        assert!(is_reverse_dns_bundle_id("dev.orbstack.OrbStack"));
+        assert!(is_reverse_dns_bundle_id("com.example-1.thing"));
+        assert!(!is_reverse_dns_bundle_id(""));
+        assert!(!is_reverse_dns_bundle_id("unknown"));
+        assert!(!is_reverse_dns_bundle_id("single"));
+        assert!(!is_reverse_dns_bundle_id("com..x"));
+        assert!(!is_reverse_dns_bundle_id(".com.x"));
+        assert!(!is_reverse_dns_bundle_id("com.exa mple.x"));
+    }
+
+    /// 残留路径集合只含 HOME/Library 下精确位置。
+    #[test]
+    fn residue_paths_are_precise() {
+        let home = std::env::var("HOME").unwrap();
+        let paths = bundle_id_residue_paths("com.example.App");
+        for p in &paths {
+            assert!(p.starts_with(&format!("{home}/Library/")), "越界: {p}");
+        }
+        assert!(paths.contains(&format!("{home}/Library/Containers/com.example.App")));
+        assert!(paths.contains(&format!("{home}/Library/Preferences")) == false); // Preferences 只按名称，不在 bundle 集合
+    }
+
+    /// 卸载本体：不存在的应用跳过。
+    #[test]
+    fn uninstall_missing_app_skipped() {
+        let r = uninstall_app("/nonexistent/App.app", "com.example.none", true);
+        assert_eq!(r.outcomes[0].status, "skipped");
+    }
+
+    /// 保护分级阻止系统关键应用。
+    #[test]
+    fn protected_app_uninstall_blocked() {
+        // 用临时目录构造一个"应用"，但 bundle 属于系统关键 → 本体跳过。
+        let tmp = std::env::temp_dir().join(format!("mole_rs_un_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let r = uninstall_app(&tmp.to_string_lossy(), "com.apple.finder", true);
+        assert!(r.outcomes.iter().all(|o| o.status == "skipped"));
+        assert!(tmp.exists(), "受保护应用不得被删除");
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

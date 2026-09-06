@@ -52,6 +52,7 @@ pub fn run() {
             commands::purge::purge_execute,
             commands::app::get_home_dir,
             commands::uninstall::uninstall_list_apps,
+            commands::uninstall::uninstall_app,
             commands::history::history_list,
             commands::optimize::optimize_tasks,
             commands::optimize::optimize_execute,

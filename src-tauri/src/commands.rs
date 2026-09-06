@@ -74,10 +74,25 @@ pub mod history {
 }
 
 pub mod uninstall {
+    use crate::clean::CleanExecuteResult;
+
     /// 应用清单（只读，对标 mo uninstall 列表阶段）。
     #[tauri::command]
     pub async fn uninstall_list_apps() -> Result<Vec<crate::uninstall::AppInfo>, String> {
         super::blocking(crate::uninstall::list_apps).await
+    }
+
+    /// 卸载应用：本体 + 精确 bundle ID 残留，走 Trash 安全删除。
+    #[tauri::command]
+    pub async fn uninstall_app(
+        app_path: String,
+        bundle_id: String,
+        dry_run: bool,
+    ) -> Result<CleanExecuteResult, String> {
+        super::blocking(move || {
+            crate::uninstall::uninstall_app(&app_path, &bundle_id, dry_run)
+        })
+        .await
     }
 }
 
