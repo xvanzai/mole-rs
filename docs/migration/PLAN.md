@@ -25,7 +25,7 @@
 | 3 | clean 深度清理 | `bin/clean.sh`、`lib/clean/*`、`lib/core/app_protection*.sh` | `src-tauri/src/clean/` + `src/pages/CleanPage.vue` | 清理页（预览→执行） | 🟢 3a+3b+3c(第一片) 完成（白名单、完整保护层、Trash 安全删除、双日志、执行 UI、开发工具链族 46 行）；3c 其余=需要探测/进程守卫的行 + system/browser 族 |
 | 4 | purge 项目构建产物清理 | `bin/purge.sh`、`lib/clean/project.sh` | `src-tauri/src/commands/purge.rs` | 项目清理页 | 待办 |
 | 5 | analyze 磁盘分析 | `cmd/analyze/*.go` | `src-tauri/src/analyze/` + `src/pages/AnalyzePage.vue` | 磁盘浏览页 | ✅ 第一片完成（扫描器容量语义+浏览+删除）；缓存层/Spotlight预热/快照对比暂缓 |
-| 6 | uninstall 应用卸载 | `bin/uninstall.sh` + `lib/uninstall/*` | `src-tauri/src/uninstall/` + `src/pages/UninstallPage.vue` | 卸载页 | 🟡 6a 完成（只读清单+保护分级）；6b=应用删除+find_app_files 残留查找（逐行复核） |
+| 6 | uninstall 应用卸载 | `bin/uninstall.sh` + `lib/uninstall/*` | `src-tauri/src/uninstall/` + `src/pages/UninstallPage.vue` | 卸载页 | 🟢 6a+6b 完成（清单+保护分级+本体+精确残留删除）；6c=名称变体/LaunchAgents/兄弟守卫（逐行复核） |
 | 7 | optimize 优化维护 | `bin/optimize.sh` + `lib/optimize/*` | `src-tauri/src/optimize/` + `src/pages/OptimizePage.vue` | 优化页 | 🟡 7a 完成（目录+框架+saved_state_cleanup）；其余 20 个处理器逐个移植中 |
 | 8 | history / manage（更新、白名单、自移除） | `bin/history.sh` + `lib/core/history.sh` + `lib/manage/*` | `src-tauri/src/history.rs` + `src/pages/HistoryPage.vue` | 历史页 / 设置页 | ✅ 8a 历史 + 8b 设置页（白名单/purge_paths 管理） |
 
