@@ -436,3 +436,25 @@
 
 - 104 个测试通过（新增：目录完整性/唯一性/命名规范、implemented 标记一致性、未移植任务 unavailable 语义）。
 - 真机冒烟：本机无 `~/Library/Saved Application State`（macOS 26 惰性创建）→ Unavailable，与原实现 `-d` 分支行为一致。
+
+---
+
+<a name="optimize-7b"></a>
+## optimize 优化维护（模块7第二片：cache_refresh / prevent_network_dsstore / legacy_overrides_audit）
+
+### 对标记录
+
+- `opt_cache_refresh` 1:1：`qlmanage -r cache`（缩略图）+ `qlmanage -r`（图标）刷新（dry-run 跳过）；三个固定缓存目标（QuickLook.thumbnailcache、iconservices.store、iconservices）存在性 → 保护检查 → 删除。
+- `opt_prevent_network_dsstore` 1:1：`defaults read/write com.apple.desktopservices` 两个键（DSDontWriteNetworkStores / DSDontWriteUSBStores），already/changed/failed 计数与结果映射。
+- `opt_legacy_overrides_audit` 1:1：App Nap 全局开关（NSAppSleepDisabled，truthy 判定 1/TRUE/YES）+ DiskImages skip-verify 家族三个键；白名单检查对应 plist 后 `defaults delete`；只删显式覆盖键，不写替代偏好（#1242/#1243）。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| cache_refresh 删除 | safe_remove（永久） | delete_to_trash（回收站） | **加固** | 统一 Trash 可恢复契约（同 clean/purge/analyze） |
+| 结果映射 | optimize_task_result_from_counts | failed>0→Failed；changed>0→Applied；skipped-only→Skipped；否则 Unchanged | 无行为变更 | 与六态语义对齐 |
+
+### 测试
+
+- 105 个测试通过；真机 dry-run 冒烟四项全部正常（本机状态：.DS_Store 预防已生效、无遗留覆盖、无缓存待清、无 Saved State 目录）。

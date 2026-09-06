@@ -55,8 +55,16 @@ pub fn task_catalog() -> Vec<OptimizeTask> {
             action,
             health_name,
             description,
-            // 首片仅移植 saved_state_cleanup；其余处理器逐个对标后开放。
-            implemented: *action == "saved_state_cleanup",
+            // 首批移植：saved_state_cleanup / cache_refresh /
+            // prevent_network_dsstore / legacy_overrides_audit；
+            // 其余处理器逐个对标后开放。
+            implemented: matches!(
+                *action,
+                "saved_state_cleanup"
+                    | "cache_refresh"
+                    | "prevent_network_dsstore"
+                    | "legacy_overrides_audit"
+            ),
         })
         .collect()
 }
@@ -125,6 +133,18 @@ pub fn execute(selected: &[String], dry_run: bool) -> OptimizeResult {
         match task.action {
             "saved_state_cleanup" => {
                 let (outcome, detail) = saved_state_cleanup(dry_run);
+                record(&mut outcomes, task.action, outcome, &detail);
+            }
+            "cache_refresh" => {
+                let (outcome, detail) = cache_refresh(dry_run);
+                record(&mut outcomes, task.action, outcome, &detail);
+            }
+            "prevent_network_dsstore" => {
+                let (outcome, detail) = prevent_network_dsstore(dry_run);
+                record(&mut outcomes, task.action, outcome, &detail);
+            }
+            "legacy_overrides_audit" => {
+                let (outcome, detail) = legacy_overrides_audit(dry_run);
                 record(&mut outcomes, task.action, outcome, &detail);
             }
             other => {
@@ -248,6 +268,208 @@ fn saved_state_cleanup(dry_run: bool) -> (Outcome, String) {
     )
 }
 
+/// 对标 `opt_cache_refresh`：qlmanage 刷新 + 三个固定缓存目标走 Trash。
+///
+/// 加固差异：原实现经 safe_remove 永久删除；Rust 侧统一走
+/// `delete_to_trash`（回收站可恢复），见 CHANGES.md。
+fn cache_refresh(dry_run: bool) -> (Outcome, String) {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let targets = [
+        format!("{home}/Library/Caches/com.apple.QuickLook.thumbnailcache"),
+        format!("{home}/Library/Caches/com.apple.iconservices.store"),
+        format!("{home}/Library/Caches/com.apple.iconservices"),
+    ];
+
+    let mut refresh_failed = 0usize;
+    if !dry_run {
+        // 对标：qlmanage -r cache（缩略图）与 qlmanage -r（图标）。
+        if crate::status::run_cmd("qlmanage", &["-r", "cache"], Duration::from_secs(10)).is_err() {
+            refresh_failed += 1;
+        }
+        if crate::status::run_cmd("qlmanage", &["-r"], Duration::from_secs(10)).is_err() {
+            refresh_failed += 1;
+        }
+    }
+
+    let mut removed_count = 0usize;
+    let mut remove_failed = 0usize;
+    let mut freed = 0u64;
+    for target in &targets {
+        let p = Path::new(target);
+        if !p.exists() && !p.is_symlink() {
+            continue;
+        }
+        if crate::clean::protect::should_protect_path(target) {
+            continue;
+        }
+        let outcome = crate::clean::delete::delete_to_trash(target, dry_run, "optimize");
+        match outcome.status.as_str() {
+            "ok" | "dry-run" => removed_count += 1,
+            "failed" => remove_failed += 1,
+            _ => {}
+        }
+        freed += outcome.size_bytes;
+    }
+
+    if (refresh_failed > 0 || remove_failed > 0) && removed_count == 0 {
+        return (
+            Outcome::Failed,
+            format!("qlmanage 刷新失败 {refresh_failed}，删除失败 {remove_failed}"),
+        );
+    }
+    if removed_count > 0 {
+        let refresh_note = if refresh_failed > 0 || remove_failed > 0 {
+            "，部分失败"
+        } else {
+            "，qlmanage 刷新完成"
+        };
+        return (
+            Outcome::Applied,
+            format!("已清理 {removed_count} 项（{} KB）{refresh_note}", freed / 1024),
+        );
+    }
+    (
+        Outcome::Unchanged,
+        if refresh_failed > 0 {
+            "无缓存可清，qlmanage 刷新部分失败".into()
+        } else {
+            "无缓存需要清理".into()
+        },
+    )
+}
+
+/// 对标 `opt_prevent_network_dsstore`：com.apple.desktopservices 的两个
+/// 键（网络/USB）读取 → 写 -bool true。
+fn prevent_network_dsstore(dry_run: bool) -> (Outcome, String) {
+    let domain = "com.apple.desktopservices";
+    let keys = ["DSDontWriteNetworkStores", "DSDontWriteUSBStores"];
+    let mut changed = 0usize;
+    let mut already = 0usize;
+    let mut failed = 0usize;
+
+    for key in keys {
+        let current = crate::status::run_cmd("defaults", &["read", domain, key], Duration::from_secs(3))
+            .unwrap_or_default();
+        if current.trim() == "1" {
+            already += 1;
+            continue;
+        }
+        if dry_run {
+            changed += 1;
+            continue;
+        }
+        if crate::status::run_cmd(
+            "defaults",
+            &["write", domain, key, "-bool", "true"],
+            Duration::from_secs(3),
+        )
+        .is_ok()
+        {
+            changed += 1;
+        } else {
+            failed += 1;
+        }
+    }
+
+    if failed > 0 && changed == 0 {
+        return (Outcome::Failed, "写入失败".into());
+    }
+    if changed > 0 {
+        return (
+            Outcome::Applied,
+            if failed > 0 {
+                format!("已启用 {changed} 项，{failed} 项失败")
+            } else {
+                format!("已在网络与 USB 卷启用 .DS_Store 预防（{changed} 项）")
+            },
+        );
+    }
+    if already > 0 {
+        return (Outcome::Unchanged, ".DS_Store 预防已生效".into());
+    }
+    (Outcome::Unchanged, "无需变更".into())
+}
+
+/// 对标 `opt_legacy_overrides_audit`：App Nap 全局开关 + DiskImages
+/// skip-verify 家族的遗留覆盖；truthy 判定 1/TRUE/YES；白名单检查
+/// 对应 plist 后 defaults delete。
+fn legacy_overrides_audit(dry_run: bool) -> (Outcome, String) {
+    fn is_truthy(v: &str) -> bool {
+        let t = v.trim();
+        t == "1"
+            || t.eq_ignore_ascii_case("true")
+            || t.eq_ignore_ascii_case("yes")
+    }
+
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut found: Vec<(&str, &str, &str, String)> = Vec::new(); // (domain, key, label, plist)
+
+    let global = crate::status::run_cmd("defaults", &["read", "-g", "NSAppSleepDisabled"], Duration::from_secs(3))
+        .unwrap_or_default();
+    if is_truthy(&global) {
+        found.push((
+            "-g",
+            "NSAppSleepDisabled",
+            "App Nap disabled globally (NSAppSleepDisabled)",
+            format!("{home}/Library/Preferences/.GlobalPreferences.plist"),
+        ));
+    }
+    for key in ["skip-verify", "skip-verify-locked", "skip-verify-remote"] {
+        let v = crate::status::run_cmd(
+            "defaults",
+            &["read", "com.apple.frameworks.diskimages", key],
+            Duration::from_secs(3),
+        )
+        .unwrap_or_default();
+        if is_truthy(&v) {
+            found.push((
+                "com.apple.frameworks.diskimages",
+                key,
+                "Disk-image verification skipped",
+                format!("{home}/Library/Preferences/com.apple.frameworks.diskimages.plist"),
+            ));
+        }
+    }
+
+    if found.is_empty() {
+        return (Outcome::Unchanged, "未发现遗留 App Nap 或磁盘映像覆盖".into());
+    }
+
+    let mut changed = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+    let whitelist = crate::clean::whitelist::Whitelist::load();
+    for (domain, key, _label, plist) in &found {
+        if whitelist.is_whitelisted(plist) {
+            skipped += 1;
+            continue;
+        }
+        if dry_run {
+            changed += 1;
+            continue;
+        }
+        if crate::status::run_cmd("defaults", &["delete", domain, key], Duration::from_secs(3)).is_ok() {
+            changed += 1;
+        } else {
+            failed += 1;
+        }
+    }
+
+    if failed > 0 && changed == 0 {
+        return (Outcome::Failed, "删除覆盖键失败".into());
+    }
+    if changed > 0 {
+        return (
+            Outcome::Applied,
+            format!("已移除 {changed} 个覆盖{}", if skipped > 0 { format!("（跳过白名单 {skipped}）") } else { String::new() }),
+        );
+    }
+    if skipped > 0 {
+        return (Outcome::Skipped, format!("全部在白名单中（{skipped}）"));
+    }
+    (Outcome::Unchanged, "无需变更".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,11 +497,11 @@ mod tests {
     #[test]
     fn catalog_implemented_marker() {
         for t in task_catalog() {
-            if t.action == "saved_state_cleanup" {
-                assert!(t.implemented);
-            } else {
-                assert!(!t.implemented, "{} 应标注待移植", t.action);
-            }
+            let implemented = matches!(
+                t.action,
+                "saved_state_cleanup" | "cache_refresh" | "prevent_network_dsstore" | "legacy_overrides_audit"
+            );
+            assert_eq!(t.implemented, implemented, "{} 标记不一致", t.action);
         }
     }
 
@@ -299,7 +521,12 @@ mod smoke_tests {
     #[test]
     #[ignore]
     fn saved_state_dry_run_smoke() {
-        let r = super::execute(&["saved_state_cleanup".to_string()], true);
+        let r = super::execute(&[
+            "saved_state_cleanup".to_string(),
+            "cache_refresh".to_string(),
+            "prevent_network_dsstore".to_string(),
+            "legacy_overrides_audit".to_string(),
+        ], true);
         for res in &r.results {
             println!("[{}] {} ({})", res.outcome, res.action, res.detail);
         }
