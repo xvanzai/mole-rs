@@ -49,6 +49,19 @@ pub mod optimize {
     }
 }
 
+pub mod manage {
+    use crate::manage::{PurgePathsConfig, WhitelistConfig};
+
+    #[tauri::command]
+    pub fn get_whitelist() -> WhitelistConfig { crate::manage::get_whitelist() }
+    #[tauri::command]
+    pub fn set_whitelist(lines: Vec<String>) -> Result<(), String> { crate::manage::set_whitelist(&lines) }
+    #[tauri::command]
+    pub fn get_purge_paths() -> PurgePathsConfig { crate::manage::get_purge_paths() }
+    #[tauri::command]
+    pub fn set_purge_paths(lines: Vec<String>) -> Result<(), String> { crate::manage::set_purge_paths(&lines) }
+}
+
 pub mod history {
     /// 操作历史（对标 mo history --json）。
     #[tauri::command]

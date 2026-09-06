@@ -3,6 +3,7 @@ mod commands;
 mod analyze;
 mod core;
 mod history;
+mod manage;
 mod optimize;
 mod purge;
 mod status;
@@ -54,6 +55,10 @@ pub fn run() {
             commands::history::history_list,
             commands::optimize::optimize_tasks,
             commands::optimize::optimize_execute,
+            commands::manage::get_whitelist,
+            commands::manage::set_whitelist,
+            commands::manage::get_purge_paths,
+            commands::manage::set_purge_paths,
             commands::analyze::analyze_scan,
             commands::analyze::analyze_delete
         ])

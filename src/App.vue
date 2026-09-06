@@ -9,6 +9,7 @@ import AnalyzePage from "./pages/AnalyzePage.vue";
 import UninstallPage from "./pages/UninstallPage.vue";
 import HistoryPage from "./pages/HistoryPage.vue";
 import OptimizePage from "./pages/OptimizePage.vue";
+import SettingsPage from "./pages/SettingsPage.vue";
 
 /**
  * 应用外壳：侧边导航 + 模块页面切换。
@@ -103,8 +104,9 @@ const modules: ModuleDef[] = [
     label: "设置",
     icon: "⚙️",
     origin: "Mole lib/manage/*",
-    status: "模块 8 · 待迁移",
+    status: "模块 8b · 已完成",
     description: "白名单保护、应用更新与偏好设置。",
+    component: markRaw(SettingsPage),
   },
 ];
 
