@@ -139,7 +139,7 @@ fn resolve_entry_path(entry: &catalog::CatalogEntry) -> PathBuf {
 ///
 /// 支持每段 `*` / `?` / `[...]`（fnmatch 风格，与 bash `[[ == $p ]]` 的
 /// glob 匹配语义一致）；无通配段直接拼接，不存在的段返回空。
-fn expand_glob(pattern: &Path) -> Vec<PathBuf> {
+pub(crate) fn expand_glob(pattern: &Path) -> Vec<PathBuf> {
     let mut current: Vec<PathBuf> = vec![PathBuf::new()];
     for comp in pattern.components() {
         let comp_str = comp.as_os_str().to_string_lossy().to_string();

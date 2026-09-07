@@ -64,6 +64,8 @@ pub fn task_catalog() -> Vec<OptimizeTask> {
                     | "cache_refresh"
                     | "prevent_network_dsstore"
                     | "legacy_overrides_audit"
+                    | "sqlite_vacuum"
+                    | "quarantine_cleanup"
             ),
         })
         .collect()
@@ -145,6 +147,14 @@ pub fn execute(selected: &[String], dry_run: bool) -> OptimizeResult {
             }
             "legacy_overrides_audit" => {
                 let (outcome, detail) = legacy_overrides_audit(dry_run);
+                record(&mut outcomes, task.action, outcome, &detail);
+            }
+            "sqlite_vacuum" => {
+                let (outcome, detail) = sqlite_vacuum(dry_run);
+                record(&mut outcomes, task.action, outcome, &detail);
+            }
+            "quarantine_cleanup" => {
+                let (outcome, detail) = quarantine_cleanup(dry_run);
                 record(&mut outcomes, task.action, outcome, &detail);
             }
             other => {
@@ -470,6 +480,196 @@ fn legacy_overrides_audit(dry_run: bool) -> (Outcome, String) {
     (Outcome::Unchanged, "无需变更".into())
 }
 
+/// SQLite 文件魔数检测（对标 `file -b` 的 *SQLite* 判定；SQLite 头 16 字节）。
+fn is_sqlite_file(path: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    bytes.starts_with(b"SQLite format 3\0")
+}
+
+/// 子进程退出码探针（对标 pgrep 的 0/1/其他 三态；超时按失败处理）。
+fn probe_exit_code(bin: &str, args: &[&str], timeout: Duration) -> Option<i32> {
+    let Ok(mut child) = std::process::Command::new(bin)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return None;
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.code().unwrap_or(-1)),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+/// sqlite3 执行（统一超时包装；成功返回 stdout）。
+fn run_sqlite(db: &str, sql: &str, timeout: Duration) -> Result<String, ()> {
+    crate::status::run_cmd("sqlite3", &[db, sql], timeout).map_err(|_| ())
+}
+
+/// 对标 `opt_sqlite_vacuum`：Mail/Safari/Messages 的 SQLite VACUUM。
+/// 流程：pgrep 三态探针（任一运行中 → Skipped；探针失败 → Failed）→
+/// sqlite3 可用性 → 目标 glob（跳过 -wal/-shm）→ 保护检查 → 魔数 →
+/// 100MB 上限（#1367）→ freelist <5% 视为已优化 → integrity_check →
+/// VACUUM（dry-run 计数）。
+fn sqlite_vacuum(dry_run: bool) -> (Outcome, String) {
+    const MAX_SIZE: u64 = 104_857_600; // 对标 MOLE_SQLITE_MAX_SIZE
+    if !crate::clean::command_exists("pgrep") {
+        return (Outcome::Unavailable, "pgrep 不可用".into());
+    }
+    // 进程三态探针（对标 pgrep -x；退出码 0=运行中，1=未运行，其他=失败）。
+    let mut busy = Vec::new();
+    for app in ["Mail", "Safari", "Messages"] {
+        match probe_exit_code("pgrep", &["-x", app], Duration::from_secs(3)) {
+            Some(0) => busy.push(app),
+            Some(1) => {}
+            _ => return (Outcome::Failed, format!("无法探测 {app} 进程状态")),
+        }
+    }
+    if !busy.is_empty() {
+        return (
+            Outcome::Skipped,
+            format!("请先关闭：{}", busy.join("、")),
+        );
+    }
+    if !crate::clean::command_exists("sqlite3") {
+        return (Outcome::Unavailable, "sqlite3 不可用".into());
+    }
+
+    let home = std::env::var("HOME").unwrap_or_default();
+    let patterns = [
+        format!("{home}/Library/Mail/V*/MailData/Envelope Index*"),
+        format!("{home}/Library/Messages/chat.db"),
+        format!("{home}/Library/Safari/History.db"),
+        format!("{home}/Library/Safari/TopSites.db"),
+    ];
+
+    let mut vacuumed = 0usize;
+    let mut timed_out = 0usize;
+    let mut failed = 0usize;
+    let mut policy_skipped = 0usize;
+    let mut already_optimal = 0usize;
+
+    for pattern in &patterns {
+        for db_path in crate::clean::expand_glob(Path::new(pattern)) {
+            let db = db_path.to_string_lossy().to_string();
+            if !db_path.is_file() {
+                continue;
+            }
+            if db.ends_with("-wal") || db.ends_with("-shm") {
+                continue;
+            }
+            if crate::clean::protect::should_protect_path(&db) {
+                continue;
+            }
+            if !is_sqlite_file(&db_path) {
+                continue;
+            }
+            let Ok(meta) = db_path.metadata() else { continue };
+            if meta.len() > MAX_SIZE {
+                policy_skipped += 1;
+                continue;
+            }
+            // freelist 比率：<5% 视为已压缩。
+            let Ok(info) = run_sqlite(&db, "PRAGMA page_count; PRAGMA freelist_count;", Duration::from_secs(5)) else {
+                failed += 1;
+                continue;
+            };
+            let mut lines = info.lines();
+            let page_count: Option<u64> = lines.next().and_then(|l| l.trim().parse().ok());
+            let freelist: Option<u64> = lines.next().and_then(|l| l.trim().parse().ok());
+            match (page_count, freelist) {
+                (Some(pc), Some(fl)) if pc > 0 => {
+                    if fl * 100 < pc * 5 {
+                        already_optimal += 1;
+                        continue;
+                    }
+                }
+                _ => {
+                    failed += 1;
+                    continue;
+                }
+            }
+            if !dry_run {
+                // integrity_check 必须为 ok 才 VACUUM。
+                match run_sqlite(&db, "PRAGMA integrity_check;", Duration::from_secs(8)) {
+                    Ok(out) if out.trim() == "ok" => {}
+                    _ => {
+                        failed += 1;
+                        continue;
+                    }
+                }
+                match run_sqlite(&db, "VACUUM;", Duration::from_secs(15)) {
+                    Ok(_) => vacuumed += 1,
+                    Err(()) => timed_out += 1,
+                }
+            } else {
+                vacuumed += 1;
+            }
+        }
+    }
+
+    if vacuumed > 0 {
+        return (Outcome::Applied, format!("已优化 {vacuumed} 个数据库"));
+    }
+    if timed_out > 0 {
+        return (Outcome::Attention, format!("{timed_out} 个数据库超时"));
+    }
+    if failed > 0 {
+        return (Outcome::Failed, format!("{failed} 个数据库处理失败"));
+    }
+    if policy_skipped > 0 {
+        return (Outcome::Skipped, format!("{policy_skipped} 个数据库超 100MB 上限"));
+    }
+    if already_optimal > 0 {
+        return (Outcome::Unchanged, "数据库已处于压缩状态".into());
+    }
+    (Outcome::Unchanged, "没有需要优化的数据库".into())
+}
+
+/// 对标 `opt_quarantine_cleanup`：清空 Gatekeeper 下载追踪表并 VACUUM。
+fn quarantine_cleanup(dry_run: bool) -> (Outcome, String) {
+    if !crate::clean::command_exists("sqlite3") {
+        return (Outcome::Unavailable, "sqlite3 不可用".into());
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let db = format!("{home}/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2");
+    let db_path = Path::new(&db);
+    if !db_path.is_file() {
+        return (Outcome::Unchanged, "隔离区数据库不存在".into());
+    }
+    if crate::clean::protect::should_protect_path(&db) {
+        return (Outcome::Unchanged, "数据库受保护".into());
+    }
+    let Ok(count_out) = run_sqlite(&db, "SELECT COUNT(*) FROM LSQuarantineEvent;", Duration::from_secs(5))
+    else {
+        return (Outcome::Failed, "无法读取隔离区数据库".into());
+    };
+    let count: u64 = count_out.trim().parse().unwrap_or(0);
+    if count == 0 {
+        return (Outcome::Unchanged, "隔离区数据库已是空的".into());
+    }
+    if dry_run {
+        return (Outcome::Applied, format!("将清除 {count} 条隔离记录").into());
+    }
+    match run_sqlite(&db, "DELETE FROM LSQuarantineEvent; VACUUM;", Duration::from_secs(15)) {
+        Ok(_) => (Outcome::Applied, format!("已清除 {count} 条隔离记录").into()),
+        Err(()) => (Outcome::Failed, "清除隔离记录失败".into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,7 +699,12 @@ mod tests {
         for t in task_catalog() {
             let implemented = matches!(
                 t.action,
-                "saved_state_cleanup" | "cache_refresh" | "prevent_network_dsstore" | "legacy_overrides_audit"
+                "saved_state_cleanup"
+                    | "cache_refresh"
+                    | "prevent_network_dsstore"
+                    | "legacy_overrides_audit"
+                    | "sqlite_vacuum"
+                    | "quarantine_cleanup"
             );
             assert_eq!(t.implemented, implemented, "{} 标记不一致", t.action);
         }
@@ -508,7 +713,7 @@ mod tests {
     /// 执行框架：未移植任务记录 unavailable。
     #[test]
     fn unimplemented_task_unavailable() {
-        let r = execute(&["sqlite_vacuum".to_string()], true);
+        let r = execute(&["coreduet_cleanup".to_string()], true);
         assert_eq!(r.results.len(), 1);
         assert_eq!(r.results[0].outcome, "unavailable");
         assert_eq!(r.unavailable, 1);
@@ -526,10 +731,41 @@ mod smoke_tests {
             "cache_refresh".to_string(),
             "prevent_network_dsstore".to_string(),
             "legacy_overrides_audit".to_string(),
+            "sqlite_vacuum".to_string(),
+            "quarantine_cleanup".to_string(),
         ], true);
         for res in &r.results {
             println!("[{}] {} ({})", res.outcome, res.action, res.detail);
         }
         assert_eq!(r.failed, 0);
+    }
+}
+
+#[cfg(test)]
+mod sqlite_tests {
+    use super::*;
+
+    /// SQLite 魔数检测（对标 file -b *SQLite*）。
+    #[test]
+    fn sqlite_magic_detection() {
+        let tmp = std::env::temp_dir().join(format!("mole_rs_sql_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db = tmp.join("test.db");
+        std::fs::write(&db, b"SQLite format 3\0something").unwrap();
+        assert!(is_sqlite_file(&db));
+        let plain = tmp.join("plain.txt");
+        std::fs::write(&plain, b"not a database").unwrap();
+        assert!(!is_sqlite_file(&plain));
+        assert!(!is_sqlite_file(&tmp.join("missing.db")));
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 进程探针：pgrep 自身必然存在；对不存在进程返回 1（未运行）。
+    #[test]
+    fn probe_exit_code_semantics() {
+        if crate::clean::command_exists("pgrep") {
+            let code = probe_exit_code("pgrep", &["-x", "__mole_rs_nonexistent_proc__"], Duration::from_secs(3));
+            assert_eq!(code, Some(1), "不存在进程应返回 1");
+        }
     }
 }

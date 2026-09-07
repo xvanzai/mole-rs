@@ -540,3 +540,27 @@
 
 - 122 个测试通过（新增：通用词拒绝、vendor/product 段提取含 com 边界、变体前缀五形态、base_name 剥离含多词后缀与大小写敏感、bundle ID 边界、独立 CLI dotdir、常用目录根、Zed 特例、卸载模式保护语义）。
 - 真机 dry-run：Clash Verge 本体 + 5 个真实残留（Application Support/WebKit/Application Scripts/Preferences/LaunchAgents）正确发现，无裸目录。
+
+---
+
+<a name="optimize-7c"></a>
+## optimize 优化维护（模块7第三片：sqlite_vacuum + quarantine_cleanup）
+
+### 对标记录
+
+- `opt_sqlite_vacuum` 1:1：pgrep -x 三态探针（Mail/Safari/Messages；0=运行中→Skipped，1=未运行，其他→Failed）→ sqlite3 可用性 → 四个目标 glob（Mail/V*/MailData/Envelope Index*、Messages/chat.db、Safari/History.db、TopSites.db；跳过 -wal/-shm）→ 保护检查 → SQLite 魔数（对标 `file -b`）→ 100MB 上限（#1367）→ PRAGMA freelist <5% 视为已压缩 → integrity_check == ok → VACUUM（dry-run 计数，超时单独记账）。
+- `opt_quarantine_cleanup` 1:1：sqlite3 可用性 → 库存在 → 保护检查 → COUNT(*)==0 → Unchanged → DELETE + VACUUM（dry-run 计 Applied）。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| SQLite 类型判定 | `file -b` 子进程（*SQLite* 子串） | 魔数头 16 字节直读 | 无行为变更 | SQLite 文件头固定，避免每库 fork |
+| 超时记账 | timed_out 独立计数 | 相同（VACUUM 超时 → Attention） | 无行为变更 | — |
+| quarantine 保护分支 | 文案 "already clean" | 文案 "数据库受保护"（同 Unchanged） | 仅文案 | 行为一致：该文件名命中 com.apple.* 保护，原实现同样命中 |
+| 结果映射 | 原六态 | 同六态（vacuumed→Applied / 超时→Attention / 上限→Skipped） | 无行为变更 | — |
+
+### 测试
+
+- 124 个测试通过（新增：SQLite 魔数检测矩阵、pgrep 探针语义）。
+- 真机 dry-run 冒烟：sqlite_vacuum（本机无 Mail/Safari/Messages 库→Unchanged）、quarantine_cleanup（保护分支→Unchanged）均与原语义一致。
