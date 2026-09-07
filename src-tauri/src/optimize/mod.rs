@@ -66,6 +66,7 @@ pub fn task_catalog() -> Vec<OptimizeTask> {
                     | "legacy_overrides_audit"
                     | "sqlite_vacuum"
                     | "quarantine_cleanup"
+                    | "launch_agents_cleanup"
             ),
         })
         .collect()
@@ -155,6 +156,10 @@ pub fn execute(selected: &[String], dry_run: bool) -> OptimizeResult {
             }
             "quarantine_cleanup" => {
                 let (outcome, detail) = quarantine_cleanup(dry_run);
+                record(&mut outcomes, task.action, outcome, &detail);
+            }
+            "launch_agents_cleanup" => {
+                let (outcome, detail) = launch_agents_cleanup(dry_run);
                 record(&mut outcomes, task.action, outcome, &detail);
             }
             other => {
@@ -639,6 +644,98 @@ fn sqlite_vacuum(dry_run: bool) -> (Outcome, String) {
     (Outcome::Unchanged, "没有需要优化的数据库".into())
 }
 
+/// 对标 `launch_agent_volume_mounted`：/Volumes/<disk> 下的程序仅当卷已挂载
+/// 才算"可达"（拔盘不等于代理损坏）。
+fn launch_agent_volume_mounted(binary: &str) -> bool {
+    if let Some(rest) = binary.strip_prefix("/Volumes/") {
+        let vol = rest.split('/').next().unwrap_or("");
+        !vol.is_empty() && Path::new(&format!("/Volumes/{vol}")).is_dir()
+    } else {
+        true
+    }
+}
+
+/// 解析单个 LaunchAgent plist 的程序路径（对标 PlistBuddy
+/// Print :ProgramArguments:0 → 回退 Print :Program）。
+fn agent_binary(plist: &Path) -> Option<String> {
+    let value = plist::Value::from_file(plist).ok()?;
+    let dict = value.as_dictionary()?;
+    if let Some(args) = dict.get("ProgramArguments").and_then(|v| v.as_array()) {
+        if let Some(first) = args.first().and_then(|v| v.as_string()) {
+            if !first.is_empty() {
+                return Some(first.to_string());
+            }
+        }
+    }
+    dict.get("Program")
+        .and_then(|v| v.as_string())
+        .map(|s| s.to_string())
+}
+
+/// 判断代理是否损坏（对标）：程序为绝对路径、真实缺失、卷可达。
+fn is_broken_agent(plist: &Path) -> bool {
+    match agent_binary(plist) {
+        Some(binary) => {
+            binary.starts_with('/') && !Path::new(&binary).exists() && launch_agent_volume_mounted(&binary)
+        }
+        None => false,
+    }
+}
+
+/// 对标 `opt_launch_agents_cleanup`：清理程序路径已不存在的用户
+/// LaunchAgent。加固差异：原实现 safe_remove 永久删除 → Trash 可恢复。
+fn launch_agents_cleanup(dry_run: bool) -> (Outcome, String) {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let agents_dir = Path::new(&home).join("Library/LaunchAgents");
+    if !agents_dir.is_dir() {
+        return (Outcome::Unchanged, "LaunchAgents 全部健康".into());
+    }
+
+    let mut broken: Vec<String> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&agents_dir) else {
+        return (Outcome::Unchanged, "LaunchAgents 全部健康".into());
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".plist") || !entry.path().is_file() {
+            continue;
+        }
+        if is_broken_agent(&entry.path()) {
+            broken.push(entry.path().to_string_lossy().to_string());
+        }
+    }
+
+    if broken.is_empty() {
+        return (Outcome::Unchanged, "LaunchAgents 全部健康".into());
+    }
+
+    let mut removed = 0usize;
+    let mut failed = 0usize;
+    for plist in &broken {
+        if !dry_run {
+            // 尽力卸载（对标 run_launchctl_unload；失败不阻断删除）。
+            let _ = crate::status::run_cmd("launchctl", &["unload", plist], Duration::from_secs(5));
+            let outcome = crate::clean::delete::delete_to_trash(plist, false, "optimize");
+            if outcome.status == "failed" {
+                failed += 1;
+                continue;
+            }
+        }
+        removed += 1;
+    }
+
+    if failed > 0 && removed == 0 {
+        return (Outcome::Failed, format!("{failed} 个代理删除失败"));
+    }
+    (
+        Outcome::Applied,
+        format!(
+            "已清理 {removed} 个损坏 LaunchAgent{}",
+            if failed > 0 { format!("（{failed} 失败）") } else { String::new() }
+        ),
+    )
+}
+
 /// 对标 `opt_quarantine_cleanup`：清空 Gatekeeper 下载追踪表并 VACUUM。
 fn quarantine_cleanup(dry_run: bool) -> (Outcome, String) {
     if !crate::clean::command_exists("sqlite3") {
@@ -705,6 +802,7 @@ mod tests {
                     | "legacy_overrides_audit"
                     | "sqlite_vacuum"
                     | "quarantine_cleanup"
+                    | "launch_agents_cleanup"
             );
             assert_eq!(t.implemented, implemented, "{} 标记不一致", t.action);
         }
@@ -733,6 +831,7 @@ mod smoke_tests {
             "legacy_overrides_audit".to_string(),
             "sqlite_vacuum".to_string(),
             "quarantine_cleanup".to_string(),
+            "launch_agents_cleanup".to_string(),
         ], true);
         for res in &r.results {
             println!("[{}] {} ({})", res.outcome, res.action, res.detail);
@@ -767,5 +866,53 @@ mod sqlite_tests {
             let code = probe_exit_code("pgrep", &["-x", "__mole_rs_nonexistent_proc__"], Duration::from_secs(3));
             assert_eq!(code, Some(1), "不存在进程应返回 1");
         }
+    }
+}
+
+#[cfg(test)]
+mod launch_agent_tests {
+    use super::*;
+
+    /// 对标 launch_agent_volume_mounted。
+    #[test]
+    fn volume_mounted_semantics() {
+        assert!(launch_agent_volume_mounted("/usr/bin/true"));
+        assert!(launch_agent_volume_mounted("/bin/sh"));
+        // /Volumes/<disk> 下依赖实际挂载状态：本机不存在该卷 → false。
+        assert!(!launch_agent_volume_mounted("/Volumes/__mole_rs_no_such_vol__/tool"));
+    }
+
+    /// 损坏判定：ProgramArguments 首元素 / Program 回退 / 裸名与相对路径。
+    #[test]
+    fn broken_agent_detection() {
+        let tmp = std::env::temp_dir().join(format!("mole_rs_la_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // 缺失绝对路径 → 损坏。
+        let missing = tmp.join("missing.plist");
+        std::fs::write(&missing, r#"<?xml version="1.0"?><plist><dict><key>ProgramArguments</key><array><string>/nonexistent/bin/tool</string></array></dict></plist>"#).unwrap();
+        assert!(is_broken_agent(&missing));
+
+        // 存在的绝对路径 → 健康（本机 macOS 27 无 /bin/true，用 /usr/bin/true）。
+        let ok = tmp.join("ok.plist");
+        std::fs::write(&ok, r#"<?xml version="1.0"?><plist><dict><key>ProgramArguments</key><array><string>/usr/bin/true</string></array></dict></plist>"#).unwrap();
+        assert!(!is_broken_agent(&ok));
+
+        // 裸名（PATH 解析）→ 健康。
+        let bare = tmp.join("bare.plist");
+        std::fs::write(&bare, r#"<?xml version="1.0"?><plist><dict><key>Program</key><string>node</string></dict></plist>"#).unwrap();
+        assert!(!is_broken_agent(&bare));
+
+        // 拔盘卷 → 健康。
+        let vol = tmp.join("vol.plist");
+        std::fs::write(&vol, r#"<?xml version="1.0"?><plist><dict><key>Program</key><string>/Volumes/__mole_rs_no_such_vol__/tool</string></dict></plist>"#).unwrap();
+        assert!(!is_broken_agent(&vol));
+
+        // Program 回退。
+        let fallback = tmp.join("fallback.plist");
+        std::fs::write(&fallback, r#"<?xml version="1.0"?><plist><dict><key>Program</key><string>/nonexistent/bin/tool</string></dict></plist>"#).unwrap();
+        assert!(is_broken_agent(&fallback));
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

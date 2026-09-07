@@ -564,3 +564,25 @@
 
 - 124 个测试通过（新增：SQLite 魔数检测矩阵、pgrep 探针语义）。
 - 真机 dry-run 冒烟：sqlite_vacuum（本机无 Mail/Safari/Messages 库→Unchanged）、quarantine_cleanup（保护分支→Unchanged）均与原语义一致。
+
+---
+
+<a name="optimize-7d"></a>
+## optimize 优化维护（模块7第四片：launch_agents_cleanup）
+
+### 对标记录
+
+- `opt_launch_agents_cleanup` 1:1：`~/Library/LaunchAgents/*.plist` 逐项解析程序路径（ProgramArguments 首元素 → 回退 Program，对标 PlistBuddy 两连探针）；仅"绝对路径 + 真实缺失 + 卷可达"计为损坏（裸名走 PATH、拔盘卷不算坏，对标 launch_agent_volume_mounted）；损坏项尽力 `launchctl unload` 后删除。
+- 加固差异：原实现 safe_remove 永久删除 → Trash 可恢复；原实现 dry-run 时仍执行 unload（疑似缺陷）→ Rust 侧 dry-run 完全跳过副作用（记入差异）。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| plist 读取 | PlistBuddy 子进程 ×2 | plist crate 直读（ProgramArguments → Program 回退） | 无行为变更 | 免每文件 fork |
+| dry-run 语义 | unload 无 dry-run 分支 | 完全跳过 | **加固** | dry-run 不应有系统副作用 |
+| 删除 | safe_remove 永久 | delete_to_trash（回收站） | **加固** | 与其余优化任务一致 |
+
+### 测试
+
+- 126 个测试通过（新增：卷可达语义、损坏判定五例——缺失路径/健康路径/裸名/拔盘卷/Program 回退）。真机冒烟：本机 LaunchAgents 全部健康 → Unchanged。
