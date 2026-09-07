@@ -609,3 +609,25 @@
 ### 测试
 
 - 126 个测试通过；真机 dry-run：本机 Knowledge 库 3.5MB → 健康 Unchanged（与原阈值逻辑一致）。
+
+---
+
+<a name="optimize-7f"></a>
+## optimize 优化维护（模块7第六片：notification_cleanup）
+
+### 对标记录
+
+- `resolve_notification_center_db` 1:1：Group Containers/group.com.apple.usernoted/db2/db → getconf DARWIN_USER_DIR 回退；两者皆无 → **Unavailable**（#1368：路径缺失 ≠ 健康空状态）。
+- `opt_notification_cleanup` 1:1：>50MB 阈值 → dry-run Applied → sqlite3 删除 30 天前投递记录 + VACUUM → 成功 killall NotificationCenter（尽力刷新）→ Applied；busy/locked → Failed。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| 路径解析 | getconf 子进程 | 相同 | 无行为变更 | — |
+| 有界性 | 30 天投递记录（非整表） | 相同 | 无行为变更 | 不触碰近期通知 |
+
+### 测试
+
+- 126 个测试通过；真机 dry-run：本机通知库（Group Containers 路径）424 KB → 健康 Unchanged（与原阈值逻辑一致）。
+- optimize 已移植 **9/21** 处理器。

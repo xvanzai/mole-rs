@@ -68,6 +68,7 @@ pub fn task_catalog() -> Vec<OptimizeTask> {
                     | "quarantine_cleanup"
                     | "launch_agents_cleanup"
                     | "coreduet_cleanup"
+                    | "notification_cleanup"
             ),
         })
         .collect()
@@ -165,6 +166,10 @@ pub fn execute(selected: &[String], dry_run: bool) -> OptimizeResult {
             }
             "coreduet_cleanup" => {
                 let (outcome, detail) = coreduet_cleanup(dry_run);
+                record(&mut outcomes, task.action, outcome, &detail);
+            }
+            "notification_cleanup" => {
+                let (outcome, detail) = notification_cleanup(dry_run);
                 record(&mut outcomes, task.action, outcome, &detail);
             }
             other => {
@@ -741,6 +746,61 @@ fn launch_agents_cleanup(dry_run: bool) -> (Outcome, String) {
     )
 }
 
+/// 对标 `resolve_notification_center_db`：两级路径解析（#1368：
+/// 找不到路径是 unavailable，不是健康空状态）。
+fn resolve_notification_center_db() -> Option<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let group_db = format!(
+        "{home}/Library/Group Containers/group.com.apple.usernoted/db2/db"
+    );
+    if Path::new(&group_db).is_file() {
+        return Some(group_db);
+    }
+    // 回退：getconf DARWIN_USER_DIR。
+    if let Ok(out) = crate::status::run_cmd("getconf", &["DARWIN_USER_DIR"], Duration::from_secs(3))
+    {
+        let dir = out.trim().trim_end_matches('/');
+        if !dir.is_empty() {
+            let candidate = format!("{dir}/com.apple.notificationcenter/db2/db");
+            if Path::new(&candidate).is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// 对标 `opt_notification_cleanup`：>50MB 通知库清理 30 天前投递记录。
+fn notification_cleanup(dry_run: bool) -> (Outcome, String) {
+    const THRESHOLD_KB: u64 = 51_200; // 对标 50MB
+    let Some(nc_db) = resolve_notification_center_db() else {
+        // Unavailable（#1368：路径缺失 ≠ 健康）。
+        return (Outcome::Unavailable, "通知中心数据库路径不可用".into());
+    };
+    let Ok(meta) = Path::new(&nc_db).metadata() else {
+        return (Outcome::Failed, "无法读取通知数据库大小".into());
+    };
+    let db_kb = meta.len() / 1024;
+    if db_kb < THRESHOLD_KB {
+        return (Outcome::Unchanged, format!("通知数据库健康（{db_kb} KB）"));
+    }
+    if dry_run {
+        return (Outcome::Applied, "将清理 30 天前的投递记录".into());
+    }
+    if !crate::clean::command_exists("sqlite3") {
+        return (Outcome::Unavailable, "sqlite3 不可用".into());
+    }
+    let sql = "DELETE FROM record WHERE delivered_date < strftime('%s','now','-30 days'); VACUUM;";
+    match run_sqlite(&nc_db, sql, Duration::from_secs(30)) {
+        Ok(_) => {
+            // 刷新通知中心（尽力，失败不阻断）。
+            let _ = crate::status::run_cmd("killall", &["NotificationCenter"], Duration::from_secs(5));
+            (Outcome::Applied, format!("通知数据库已清理（原 {db_kb} KB）"))
+        }
+        Err(()) => (Outcome::Failed, "数据库繁忙或锁定".into()),
+    }
+}
+
 /// 对标 `opt_coreduet_cleanup`：Knowledge 数据库（~750 行语义）。
 /// - 库不存在 → Unchanged；db+wal+shm 合计 <100MB → Unchanged（已健康）；
 /// - dry-run → Applied（将清理）；
@@ -877,6 +937,7 @@ mod tests {
                     | "quarantine_cleanup"
                     | "launch_agents_cleanup"
                     | "coreduet_cleanup"
+                    | "notification_cleanup"
             );
             assert_eq!(t.implemented, implemented, "{} 标记不一致", t.action);
         }
@@ -907,6 +968,7 @@ mod smoke_tests {
             "quarantine_cleanup".to_string(),
             "launch_agents_cleanup".to_string(),
             "coreduet_cleanup".to_string(),
+            "notification_cleanup".to_string(),
         ], true);
         for res in &r.results {
             println!("[{}] {} ({})", res.outcome, res.action, res.detail);
