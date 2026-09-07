@@ -586,3 +586,26 @@
 ### 测试
 
 - 126 个测试通过（新增：卷可达语义、损坏判定五例——缺失路径/健康路径/裸名/拔盘卷/Program 回退）。真机冒烟：本机 LaunchAgents 全部健康 → Unchanged。
+
+---
+
+<a name="optimize-7e"></a>
+## optimize 优化维护（模块7第五片：coreduet_cleanup）
+
+### 对标记录
+
+- `opt_coreduet_cleanup` 1:1：knowledgeC.db 缺失 → Unchanged；db+wal+shm 合计 <100MB → Unchanged（健康）；dry-run → Applied；真实：sqlite3 不可用 → Unavailable；删除 wal/shm（SQLite 自动重建）→ `DELETE FROM ZOBJECT WHERE ZCREATIONDATE < (now-90d) - 2001-01-01`（CoreTime 纪元换算）→ VACUUM。
+- 加固差异：WAL/SHM 原 safe_remove 永久 → Trash 可恢复。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| 大小合计 | du -skcP 多文件 | metadata 逐文件求和 | 无行为变更 | 语义一致 |
+| WAL/SHM 删除 | safe_remove 永久 | delete_to_trash | **加固** | 与其余优化任务一致 |
+| DELETE+VACUUM | sqlite3 子进程 | 相同（run_sqlite 超时 30s） | 无行为变更 | — |
+| 有界性 | 90 天记录删除（非整表） | 相同 | 无行为变更 | 不触碰近期使用数据 |
+
+### 测试
+
+- 126 个测试通过；真机 dry-run：本机 Knowledge 库 3.5MB → 健康 Unchanged（与原阈值逻辑一致）。

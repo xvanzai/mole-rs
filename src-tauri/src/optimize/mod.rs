@@ -67,6 +67,7 @@ pub fn task_catalog() -> Vec<OptimizeTask> {
                     | "sqlite_vacuum"
                     | "quarantine_cleanup"
                     | "launch_agents_cleanup"
+                    | "coreduet_cleanup"
             ),
         })
         .collect()
@@ -160,6 +161,10 @@ pub fn execute(selected: &[String], dry_run: bool) -> OptimizeResult {
             }
             "launch_agents_cleanup" => {
                 let (outcome, detail) = launch_agents_cleanup(dry_run);
+                record(&mut outcomes, task.action, outcome, &detail);
+            }
+            "coreduet_cleanup" => {
+                let (outcome, detail) = coreduet_cleanup(dry_run);
                 record(&mut outcomes, task.action, outcome, &detail);
             }
             other => {
@@ -736,6 +741,74 @@ fn launch_agents_cleanup(dry_run: bool) -> (Outcome, String) {
     )
 }
 
+/// 对标 `opt_coreduet_cleanup`：Knowledge 数据库（~750 行语义）。
+/// - 库不存在 → Unchanged；db+wal+shm 合计 <100MB → Unchanged（已健康）；
+/// - dry-run → Applied（将清理）；
+/// - 真实：sqlite3 不可用 → Unavailable；删除 wal/shm（Trash 加固，原
+///   safe_remove 永久）→ DELETE ZOBJECT 90 天以上记录（CoreTime 纪元
+///   2001-01-01 换算）→ VACUUM。
+fn coreduet_cleanup(dry_run: bool) -> (Outcome, String) {
+    const THRESHOLD: u64 = 102_400; // KB，对标 100MB
+    let home = std::env::var("HOME").unwrap_or_default();
+    let db_dir = format!("{home}/Library/Application Support/Knowledge");
+    let db = format!("{db_dir}/knowledgeC.db");
+    let db_path = Path::new(&db);
+    if !db_path.is_file() {
+        return (Outcome::Unchanged, "Knowledge 数据库不存在".into());
+    }
+
+    // db + wal + shm 合计大小。
+    let mut total_kb = 0u64;
+    for suffix in ["", "-wal", "-shm"] {
+        let f = format!("{db}{suffix}");
+        if let Ok(meta) = Path::new(&f).metadata() {
+            total_kb += meta.len() / 1024;
+        }
+    }
+    if total_kb < THRESHOLD {
+        return (
+            Outcome::Unchanged,
+            format!("Knowledge 数据库健康（{total_kb} KB）"),
+        );
+    }
+
+    if dry_run {
+        return (Outcome::Applied, "将清理 Knowledge 数据库（90 天以上记录）".into());
+    }
+
+    if !crate::clean::command_exists("sqlite3") {
+        return (Outcome::Unavailable, "sqlite3 不可用".into());
+    }
+
+    // 删除 WAL/SHM（SQLite 自动重建；Trash 可恢复加固）。
+    let mut removed = 0usize;
+    for suffix in ["-wal", "-shm"] {
+        let f = format!("{db}{suffix}");
+        if Path::new(&f).is_file() {
+            let outcome = crate::clean::delete::delete_to_trash(&f, false, "optimize");
+            if outcome.status == "ok" {
+                removed += 1;
+            }
+        }
+    }
+
+    // 90 天以上 ZOBJECT 记录删除 + VACUUM（CoreTime 纪元 2001-01-01）。
+    let sql = "DELETE FROM ZOBJECT WHERE ZCREATIONDATE < (strftime('%s','now','-90 days') - strftime('%s','2001-01-01')); VACUUM;";
+    match run_sqlite(&db, sql, Duration::from_secs(30)) {
+        Ok(_) => (
+            Outcome::Applied,
+            format!("Knowledge 数据库已清理（{total_kb} KB → 压缩完成）"),
+        ),
+        Err(()) => {
+            if removed > 0 {
+                (Outcome::Attention, "WAL/SHM 已清，数据库繁忙或锁定".into())
+            } else {
+                (Outcome::Failed, "数据库繁忙或锁定".into())
+            }
+        }
+    }
+}
+
 /// 对标 `opt_quarantine_cleanup`：清空 Gatekeeper 下载追踪表并 VACUUM。
 fn quarantine_cleanup(dry_run: bool) -> (Outcome, String) {
     if !crate::clean::command_exists("sqlite3") {
@@ -803,6 +876,7 @@ mod tests {
                     | "sqlite_vacuum"
                     | "quarantine_cleanup"
                     | "launch_agents_cleanup"
+                    | "coreduet_cleanup"
             );
             assert_eq!(t.implemented, implemented, "{} 标记不一致", t.action);
         }
@@ -811,7 +885,7 @@ mod tests {
     /// 执行框架：未移植任务记录 unavailable。
     #[test]
     fn unimplemented_task_unavailable() {
-        let r = execute(&["coreduet_cleanup".to_string()], true);
+        let r = execute(&["fix_broken_configs".to_string()], true);
         assert_eq!(r.results.len(), 1);
         assert_eq!(r.results[0].outcome, "unavailable");
         assert_eq!(r.unavailable, 1);
@@ -832,6 +906,7 @@ mod smoke_tests {
             "sqlite_vacuum".to_string(),
             "quarantine_cleanup".to_string(),
             "launch_agents_cleanup".to_string(),
+            "coreduet_cleanup".to_string(),
         ], true);
         for res in &r.results {
             println!("[{}] {} ({})", res.outcome, res.action, res.detail);
