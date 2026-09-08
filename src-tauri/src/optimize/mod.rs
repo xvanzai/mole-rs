@@ -69,6 +69,7 @@ pub fn task_catalog() -> Vec<OptimizeTask> {
                     | "launch_agents_cleanup"
                     | "coreduet_cleanup"
                     | "notification_cleanup"
+                    | "fix_broken_configs"
             ),
         })
         .collect()
@@ -170,6 +171,10 @@ pub fn execute(selected: &[String], dry_run: bool) -> OptimizeResult {
             }
             "notification_cleanup" => {
                 let (outcome, detail) = notification_cleanup(dry_run);
+                record(&mut outcomes, task.action, outcome, &detail);
+            }
+            "fix_broken_configs" => {
+                let (outcome, detail) = fix_broken_configs(dry_run);
                 record(&mut outcomes, task.action, outcome, &detail);
             }
             other => {
@@ -770,6 +775,121 @@ fn resolve_notification_center_db() -> Option<String> {
     None
 }
 
+/// 对标 `_preference_plist_is_protected`：com.apple.* 与 .GlobalPreferences*
+/// 永远保护；loginwindow.plist 仅在顶层 Preferences 扫描时保护。
+fn preference_plist_is_protected(filename: &str, protect_loginwindow: bool) -> bool {
+    if filename.starts_with("com.apple.") || filename.starts_with(".GlobalPreferences") {
+        return true;
+    }
+    filename == "loginwindow.plist" && protect_loginwindow
+}
+
+/// 对标 `_repair_preference_plists_in_dir`：lint 目录下 plist，损坏且通过
+/// 保护/白名单检查的走 Trash。plist crate 直读替代 plutil -lint（同为
+/// 语法校验）。返回 (修复数, 是否超预算截断)。
+fn repair_preference_plists_in_dir(
+    dir: &Path,
+    recursive: bool,
+    protect_loginwindow: bool,
+    deadline: Instant,
+    dry_run: bool,
+) -> (usize, bool) {
+    if !dir.is_dir() {
+        return (0, false);
+    }
+    // 收集候选（对标 find + 逐项 filename 保护检查）。
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    let mut stack: Vec<(PathBuf, usize)> = vec![(dir.to_path_buf(), 0)];
+    while let Some((cur, depth)) = stack.pop() {
+        if Instant::now() >= deadline {
+            return (0, true);
+        }
+        let Ok(entries) = std::fs::read_dir(&cur) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                if recursive {
+                    stack.push((path, depth + 1));
+                }
+                continue;
+            }
+            if entry.file_name().to_string_lossy().ends_with(".plist") {
+                candidates.push(path);
+            }
+        }
+    }
+
+    let whitelist = crate::clean::whitelist::Whitelist::load();
+    let mut repaired = 0usize;
+    for path in candidates {
+        if Instant::now() >= deadline {
+            return (repaired, true);
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if preference_plist_is_protected(&name, protect_loginwindow) {
+            continue;
+        }
+        // lint：plist 解析成功 = 合法（对标 plutil -lint）。
+        if plist::Value::from_file(&path).is_ok() {
+            continue;
+        }
+        let path_str = path.to_string_lossy().to_string();
+        // 深度保护检查仅在损坏文件上执行（对标）。
+        if crate::clean::protect::should_protect_path(&path_str)
+            || whitelist.is_whitelisted(&path_str)
+        {
+            continue;
+        }
+        let outcome = crate::clean::delete::delete_to_trash(&path_str, dry_run, "optimize");
+        if matches!(outcome.status.as_str(), "ok" | "dry-run") {
+            repaired += 1;
+        }
+    }
+    (repaired, false)
+}
+
+/// 对标 `opt_fix_broken_configs`：~/Library/Preferences 顶层（保护
+/// loginwindow）+ ByHost 递归；15s 预算，超时记部分结果。
+fn fix_broken_configs(dry_run: bool) -> (Outcome, String) {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let prefs_dir = Path::new(&home).join("Library/Preferences");
+    if !prefs_dir.is_dir() {
+        return (Outcome::Unchanged, "无偏好设置目录".into());
+    }
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut broken = 0usize;
+    let mut partial = false;
+
+    let (top, top_partial) =
+        repair_preference_plists_in_dir(&prefs_dir, false, true, deadline, dry_run);
+    broken += top;
+    partial |= top_partial;
+    let (byhost, byhost_partial) = repair_preference_plists_in_dir(
+        &prefs_dir.join("ByHost"),
+        true,
+        false,
+        deadline,
+        dry_run,
+    );
+    broken += byhost;
+    partial |= byhost_partial;
+
+    if broken > 0 {
+        return (
+            if partial { Outcome::Attention } else { Outcome::Applied },
+            format!("已修复 {broken} 个损坏偏好文件{}", if partial { "（扫描超预算，部分结果）" } else { "" }),
+        );
+    }
+    if partial {
+        return (Outcome::Attention, "扫描超预算，未发现损坏文件".into());
+    }
+    (Outcome::Unchanged, "全部偏好文件有效".into())
+}
+
 /// 对标 `opt_notification_cleanup`：>50MB 通知库清理 30 天前投递记录。
 fn notification_cleanup(dry_run: bool) -> (Outcome, String) {
     const THRESHOLD_KB: u64 = 51_200; // 对标 50MB
@@ -938,6 +1058,7 @@ mod tests {
                     | "launch_agents_cleanup"
                     | "coreduet_cleanup"
                     | "notification_cleanup"
+                    | "fix_broken_configs"
             );
             assert_eq!(t.implemented, implemented, "{} 标记不一致", t.action);
         }
@@ -946,7 +1067,7 @@ mod tests {
     /// 执行框架：未移植任务记录 unavailable。
     #[test]
     fn unimplemented_task_unavailable() {
-        let r = execute(&["fix_broken_configs".to_string()], true);
+        let r = execute(&["network_optimization".to_string()], true);
         assert_eq!(r.results.len(), 1);
         assert_eq!(r.results[0].outcome, "unavailable");
         assert_eq!(r.unavailable, 1);
@@ -969,6 +1090,7 @@ mod smoke_tests {
             "launch_agents_cleanup".to_string(),
             "coreduet_cleanup".to_string(),
             "notification_cleanup".to_string(),
+            "fix_broken_configs".to_string(),
         ], true);
         for res in &r.results {
             println!("[{}] {} ({})", res.outcome, res.action, res.detail);

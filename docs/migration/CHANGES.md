@@ -631,3 +631,28 @@
 
 - 126 个测试通过；真机 dry-run：本机通知库（Group Containers 路径）424 KB → 健康 Unchanged（与原阈值逻辑一致）。
 - optimize 已移植 **9/21** 处理器。
+
+---
+
+<a name="optimize-7g"></a>
+## optimize 优化维护（模块7第七片：fix_broken_configs）
+
+### 对标记录
+
+- `_preference_plist_is_protected` 1:1：com.apple.* 与 .GlobalPreferences* 永远保护；loginwindow.plist 仅顶层扫描保护（ByHost 递归不保护）。
+- `_repair_preference_plists_in_dir` 1:1：候选收集（find *.plist）→ filename 保护前置 → 损坏检测 → **深度保护/白名单检查仅在损坏文件上执行**（对标）→ 删除。
+- `opt_fix_broken_configs` 1:1：顶层（保护 loginwindow）+ ByHost 递归两轮；15s 预算超时记部分结果（partial）。
+- lint 实现：plist crate 解析成功 = 合法（对标 plutil -lint；同为语法校验，替代批量子进程）。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| 批量 lint | plutil -lint 512 个/批 + 失败批逐文件回退 | 逐文件 plist 解析 | 实现差异（语义一致） | 原批量是为规避 bash fork 开销；Rust 直读更快 |
+| 删除 | safe_remove 永久 | delete_to_trash | **加固** | 与其余优化任务一致 |
+| 部分结果 | partial=1 → Attention | 相同 | 无行为变更 | — |
+
+### 测试
+
+- 126 个测试通过；真机 dry-run：本机 Preferences 全部有效 → Unchanged。
+- optimize 已移植 **10/21** 处理器。
