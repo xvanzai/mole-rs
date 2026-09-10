@@ -58,6 +58,7 @@ pub fn family_label(family: &str) -> &'static str {
         "app_launcher" => "启动器",
         "app_remote" => "远程桌面",
         "app_misc" => "其他应用缓存",
+        "owner_command" => "Owner 命令清理",
         _ => "其他",
     }
 }

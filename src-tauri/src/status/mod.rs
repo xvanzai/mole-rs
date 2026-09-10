@@ -35,6 +35,16 @@ pub const NETWORK_HISTORY_SIZE: usize = 120;
 /// 对标 `runCmd`：以 C locale 执行子进程（#1267：ps/uptime 会本地化小数点，
 /// 导致解析失败），带超时，超时杀进程并返回错误。
 pub fn run_cmd(name: &str, args: &[&str], timeout: Duration) -> Result<String, String> {
+    run_cmd_with_env(name, args, &[], timeout)
+}
+
+/// 同 run_cmd，但可注入额外环境变量（对标 env VAR=... cmd）。
+pub fn run_cmd_with_env(
+    name: &str,
+    args: &[&str],
+    extra_env: &[(&str, &str)],
+    timeout: Duration,
+) -> Result<String, String> {
     let mut command = std::process::Command::new(name);
     command.args(args);
     // 对标 cLocaleEnv：过滤 LC_ALL / LANG / LC_* 后强制 LC_ALL=C。
@@ -49,6 +59,9 @@ pub fn run_cmd(name: &str, args: &[&str], timeout: Duration) -> Result<String, S
         }
     }
     command.env("LC_ALL", "C");
+    for (k, v) in extra_env {
+        command.env(k, v);
+    }
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::null());
     command.stdin(std::process::Stdio::null());

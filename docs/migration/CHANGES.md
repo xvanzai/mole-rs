@@ -892,3 +892,27 @@
 
 - 151 个测试通过（新增：version_cmp 矩阵、Versions fixture 候选收集、损坏 Current 跳过）。
 - 真机冒烟：**393 组**（原 221）；总量 666 MB。
+
+---
+
+<a name="clean-3g"></a>
+## clean 深度清理（子模块 3g 第七片：owner 命令删除汇）
+
+### 对标记录
+
+- `clean_tool_cache` 契约 1:1：whitelist 检查 → dry-run "would clean" → 真实执行 owner 命令。
+- npm `cache clean --force`、uv `cache prune`、corepack `cache clean`（COREPACK_ENABLE_DOWNLOAD_PROMPT=0）、pip3 `cache purge`、bun `pm cache rm`、pnpm `store prune`（进程守卫：Running/Unknown 均阻断）。
+- AGENTS.md 三契约落实：变更根经 owner 探测+校验；dry-run 与真实共享同一 resolve；命令失败/超时记 failed 可观察。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| 命令触发 | clean_tool_cache 内直接执行 | execute_owner_clean 单独路径（不走 Trash） | 无行为变更 | owner 自管缓存树 |
+| pnpm 多二进制 | list_installed_pnpm_binaries 逐个 store path + prune | 仅 PATH 中 pnpm 一个二进制 | **简化** | 多二进制去重逻辑独立子片；语义：有可用 pnpm 即 prune 其 store |
+| pip 失败 | `\|\| true` 恒成功 | 失败记 failed 可观察 | **加固** | 契约要求部分失败可观察 |
+
+### 测试
+
+- 154 个测试通过（新增：owner ops 描述唯一、resolve 路径安全、dry-run 不 panic）。
+- 真机冒烟：**399 组**（原 393）；npm cache (owner command) 可见 0.04 MB。

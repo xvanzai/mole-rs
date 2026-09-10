@@ -17,6 +17,7 @@
 
 mod catalog;
 mod old_versions;
+mod owner_clean;
 mod probe;
 pub(crate) mod delete;
 pub(crate) mod process;
@@ -1045,6 +1046,34 @@ pub fn scan_preview() -> CleanPreview {
         });
     }
 
+    // owner 命令删除汇（对标 clean_tool_cache 调用点）：每条一个合成组。
+    for op in owner_clean::owner_clean_ops() {
+        let (ok, detail) = owner_clean::execute_owner_clean(&op, true);
+        let (path, size) = if let Some(p) = (op.resolve_cache_path)() {
+            let s = p.to_string_lossy().to_string();
+            let sz = path_size_with_deadline(&p, global_deadline);
+            (s, sz)
+        } else {
+            (String::new(), 0)
+        };
+        let items = if path.is_empty() {
+            Vec::new()
+        } else {
+            vec![CleanItem {
+                path,
+                size_bytes: size,
+                skip_reason: if ok { String::new() } else { detail.clone() },
+            }]
+        };
+        groups.push(CleanGroup {
+            description: op.description.to_string(),
+            family: "owner_command".to_string(),
+            items,
+            total_size_bytes: size,
+            skipped_count: usize::from(!ok),
+        });
+    }
+
     let total_size = groups.iter().map(|g| g.total_size_bytes).sum();
     CleanPreview {
         groups,
@@ -1109,6 +1138,39 @@ pub fn execute_clean(selected_groups: &[String], dry_run: bool) -> CleanExecuteR
             }
             outcomes.push(outcome);
         }
+    }
+
+    // owner 命令删除汇（对标 clean_tool_cache）。
+    for op in owner_clean::owner_clean_ops() {
+        if !selected_groups.iter().any(|s| s == op.description) {
+            continue;
+        }
+        let (ok, detail) = owner_clean::execute_owner_clean(&op, dry_run);
+        let path = (op.resolve_cache_path)()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let status = if dry_run {
+            "dry-run"
+        } else if ok {
+            "ok"
+        } else {
+            "failed"
+        };
+        if status == "ok" && !dry_run {
+            deleted_count += 1;
+        } else if status == "failed" {
+            failed_count += 1;
+        }
+        outcomes.push(DeleteOutcome {
+            path: if path.is_empty() {
+                op.description.to_string()
+            } else {
+                path
+            },
+            status: status.into(),
+            size_bytes: 0,
+            detail,
+        });
     }
 
     delete::log_session_end("clean", deleted_count, freed_bytes);

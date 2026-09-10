@@ -132,6 +132,11 @@ pub fn utm_process_state() -> ProcessState {
     pgrep_any(&[("-x", "UTM")])
 }
 
+/// pnpm（对标 pnpm_process_blocks_prune：Running/Unknown 均阻断 prune）。
+pub fn pnpm_process_state() -> ProcessState {
+    pgrep_any(&[("-x", "pnpm")])
+}
+
 /// Dropbox。
 pub fn dropbox_process_state() -> ProcessState {
     pgrep_any(&[("-x", "Dropbox")])
