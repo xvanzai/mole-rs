@@ -80,6 +80,7 @@ pub fn task_catalog() -> Vec<OptimizeTask> {
                     | "disk_verify"
                     | "spotlight_index_optimize"
                     | "spotlight_orphan_rules_cleanup"
+                    | "login_items_audit"
             ),
         })
         .collect()
@@ -263,6 +264,10 @@ pub fn execute(selected: &[String], dry_run: bool) -> OptimizeResult {
             }
             "spotlight_orphan_rules_cleanup" => {
                 let (outcome, detail) = spotlight_orphan_rules_cleanup(dry_run);
+                record(&mut outcomes, task.action, outcome, &detail);
+            }
+            "login_items_audit" => {
+                let (outcome, detail) = login_items_audit();
                 record(&mut outcomes, task.action, outcome, &detail);
             }
             "saved_state_cleanup" => {
@@ -1887,6 +1892,224 @@ fn spotlight_orphan_rules_cleanup(dry_run: bool) -> (Outcome, String) {
     }
 }
 
+/// 对标 `_login_items_snapshot`：osascript System Events 枚举登录项，
+/// 输出 `name\tPOSIX path` 行。
+fn login_items_snapshot() -> Result<Vec<(String, String)>, ()> {
+    const SCRIPT: &str = r#"tell application "System Events"
+set out to ""
+repeat with loginItem in login items
+	set itemName to ""
+	set itemPath to ""
+	try
+		set itemName to name of loginItem as text
+	end try
+	try
+		set itemPath to POSIX path of (path of loginItem as alias)
+	on error
+		try
+			set itemPath to path of loginItem as text
+		end try
+	end try
+	set out to out & itemName & tab & itemPath & linefeed
+end repeat
+return out
+end tell"#;
+    let output = crate::status::run_cmd("osascript", &["-e", SCRIPT], Duration::from_secs(15))
+        .map_err(|_| ())?;
+    Ok(output
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|line| {
+            let mut parts = line.splitn(2, '\t');
+            let name = parts.next()?.trim().to_string();
+            let path = parts.next().unwrap_or("").trim().to_string();
+            if name.is_empty() {
+                None
+            } else {
+                Some((name, path))
+            }
+        })
+        .collect())
+}
+
+/// 对标 `_login_item_name_matches`：精确 / 去空格 / 剥后缀名匹配。
+fn login_item_name_matches(actual: &str, expected: &str, nospace: &str, stripped: &str) -> bool {
+    if actual.is_empty() {
+        return false;
+    }
+    let actual_nospace = actual.replace(' ', "");
+    actual == expected
+        || actual_nospace == nospace
+        || (!stripped.is_empty() && actual_nospace == stripped)
+}
+
+/// 对标 helper 后缀剥离：Client|Helper|Agent|Launcher|Service$。
+fn strip_helper_suffix(nospace: &str) -> String {
+    for suffix in ["Client", "Helper", "Agent", "Launcher", "Service"] {
+        if nospace.len() > suffix.len() && nospace.ends_with(suffix) {
+            return nospace[..nospace.len() - suffix.len()].to_string();
+        }
+    }
+    nospace.to_string()
+}
+
+/// 对标 `_login_item_bundle_metadata_matches`：Info.plist 的
+/// CFBundleDisplayName / CFBundleName / CFBundleExecutable 任一匹配。
+fn login_item_bundle_metadata_matches(app: &Path, name: &str, nospace: &str, stripped: &str) -> bool {
+    let Some(dict) = read_info_dict(&app.join("Contents/Info.plist")) else {
+        return false;
+    };
+    for key in ["CFBundleDisplayName", "CFBundleName", "CFBundleExecutable"] {
+        if let Some(value) = dict.get(key).and_then(|v| v.as_string()) {
+            if login_item_name_matches(value, name, nospace, stripped) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// mdfind 查找 *.app 是否存在（对标 kMDItemFSName == '<name>.app'）。
+fn mdfind_app_named(app_name: &str) -> bool {
+    if !crate::clean::command_exists("mdfind") || app_name.contains('\'') {
+        return false;
+    }
+    let query = format!("kMDItemFSName == '{app_name}'");
+    crate::status::run_cmd("mdfind", &[&query], Duration::from_secs(3))
+        .map(|o| !o.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// 对标 `_login_item_app_exists`：路径 → Spotlight 三段名 → 文件系统
+/// 按名 → bundle 元数据 → sfltool BTM（仅 sudo -n）。
+fn login_item_app_exists(name: &str, item_path: &str) -> bool {
+    // 1. 登录项自带路径。
+    if !item_path.is_empty() {
+        let p = Path::new(item_path);
+        if p.exists() || p.is_symlink() {
+            return true;
+        }
+    }
+
+    let nospace = name.replace(' ', "");
+    let stripped = strip_helper_suffix(&nospace);
+
+    // 2-4. Spotlight 名匹配。
+    if mdfind_app_named(&format!("{name}.app")) {
+        return true;
+    }
+    if nospace != name && mdfind_app_named(&format!("{nospace}.app")) {
+        return true;
+    }
+    if stripped != nospace && mdfind_app_named(&format!("{stripped}.app")) {
+        return true;
+    }
+
+    // 5. 文件系统按名 + bundle 元数据（深度 ≤6，对标 find -maxdepth 6）。
+    let mut app_names: Vec<String> = vec![format!("{name}.app")];
+    if nospace != name {
+        app_names.push(format!("{nospace}.app"));
+    }
+    if stripped != nospace {
+        app_names.push(format!("{stripped}.app"));
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    for root in [format!("/Applications"), format!("{home}/Applications")] {
+        if !Path::new(&root).is_dir() {
+            continue;
+        }
+        // 按名命中。
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                let n = entry.file_name().to_string_lossy().to_string();
+                if app_names.iter().any(|a| a.eq_ignore_ascii_case(&n)) && entry.path().is_dir() {
+                    return true;
+                }
+            }
+        }
+        // 元数据扫描（有界 8s）。
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut stack = vec![(PathBuf::from(&root), 0usize)];
+        while let Some((dir, depth)) = stack.pop() {
+            if Instant::now() >= deadline {
+                break;
+            }
+            if depth > 6 {
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries.flatten() {
+                if Instant::now() >= deadline {
+                    break;
+                }
+                let path = entry.path();
+                let n = entry.file_name().to_string_lossy().to_string();
+                if n.ends_with(".app") && path.is_dir() {
+                    if login_item_bundle_metadata_matches(&path, name, &nospace, &stripped) {
+                        return true;
+                    }
+                    // 嵌套 helper 一层。
+                    if depth < 6 {
+                        stack.push((path, depth + 1));
+                    }
+                }
+            }
+        }
+    }
+
+    // 6. sfltool dumpbtm（仅密码缓存 sudo -n，不弹框——对标 root-only 回退）。
+    if optimize_sudo_available(false) {
+        if let Ok(dump) = crate::status::run_cmd(
+            "sudo",
+            &["sfltool", "dumpbtm"],
+            Duration::from_secs(15),
+        ) {
+            let name_lower = name.to_lowercase();
+            for line in dump.lines() {
+                if line.to_lowercase().contains(&name_lower) {
+                    if let Some(start) = line.find("/" ) {
+                        if let Some(end) = line[start..].find(".app") {
+                            let candidate = &line[start..start + end + 4];
+                            if Path::new(candidate).exists() {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// 对标 `opt_login_items_audit`：快照登录项 → 逐项校验应用存在性 →
+/// 损坏项记 Attention（审计只读，不删除）。
+fn login_items_audit() -> (Outcome, String) {
+    let Ok(items) = login_items_snapshot() else {
+        return (Outcome::Failed, "无法检查登录项（需要自动化权限）".into());
+    };
+    if items.is_empty() {
+        return (Outcome::Unchanged, "未发现登录项".into());
+    }
+
+    let mut broken = 0usize;
+    let checked = items.len();
+    for (name, path) in &items {
+        if !login_item_app_exists(name, path) {
+            broken += 1;
+        }
+    }
+
+    if broken == 0 {
+        (Outcome::Unchanged, format!("登录项全部健康（已检查 {checked} 项）"))
+    } else {
+        (
+            Outcome::Attention,
+            format!("{broken} 个损坏登录项 · 请在系统设置 > 通用 > 登录项中移除"),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1936,22 +2159,26 @@ mod tests {
                     | "disk_verify"
                     | "spotlight_index_optimize"
                     | "spotlight_orphan_rules_cleanup"
+                    | "login_items_audit"
             );
             assert_eq!(t.implemented, implemented, "{} 标记不一致", t.action);
         }
     }
 
-    /// 执行框架：未移植任务记录 unavailable。
+    /// 执行框架：21 项全部已移植，不再有 unavailable 占位。
     #[test]
-    fn unimplemented_task_unavailable() {
-        let r = execute(&["login_items_audit".to_string()], true);
-        assert_eq!(r.results.len(), 1);
-        assert_eq!(r.results[0].outcome, "unavailable");
-        assert_eq!(r.unavailable, 1);
+    fn all_tasks_implemented() {
+        let tasks = task_catalog();
+        assert!(tasks.iter().all(|t| t.implemented), "仍有未移植处理器");
+        // 框架仍保留 unavailable 分支（防御性），但目录内不应触发。
+        let r = execute(&["__not_a_real_action__".to_string()], true);
+        assert_eq!(r.results.len(), 0, "未知 action 不产生结果（catalog 过滤）");
     }
 }
 
 /// 真机冒烟（默认忽略）：dry-run 执行已移植优化任务。
+/// 排除 login_items_audit：需要 osascript System Events 自动化权限（TCC），
+/// 无头 cargo test 环境必然 Failed——真机 GUI 首次运行时由用户授权。
 #[cfg(test)]
 mod smoke_tests {
     #[test]
@@ -2177,5 +2404,21 @@ mod network_launch_tests {
             classify_spotlight_rule("com.example.SomeApp"),
             SpotlightRuleAction::CheckInstalled
         );
+    }
+
+    /// 登录项名称匹配：精确 / 去空格 / helper 后缀剥离。
+    #[test]
+    fn login_item_name_matching() {
+        assert!(login_item_name_matches("Top Calendar", "Top Calendar", "TopCalendar", "TopCalendar"));
+        assert!(login_item_name_matches("TopCalendar", "Top Calendar", "TopCalendar", "TopCalendar"));
+        assert!(!login_item_name_matches("", "Top Calendar", "TopCalendar", "TopCalendar"));
+        assert!(!login_item_name_matches("Other", "Top Calendar", "TopCalendar", "TopCalendar"));
+
+        assert_eq!(strip_helper_suffix("AliLangClient"), "AliLang");
+        assert_eq!(strip_helper_suffix("DBnginMenuHelper"), "DBnginMenu");
+        assert_eq!(strip_helper_suffix("Safari"), "Safari");
+        assert_eq!(strip_helper_suffix("AgentHelper"), "Agent");
+        // 长度不足后缀不剥离。
+        assert_eq!(strip_helper_suffix("Client"), "Client");
     }
 }

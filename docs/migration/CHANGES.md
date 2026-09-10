@@ -757,3 +757,28 @@
 - 136 个测试通过（新增：规则分类矩阵——System./com.apple./畸形/合法 ID）。
 - 真机 dry-run 冒烟：spotlight_index_optimize → unchanged（索引最优）；spotlight_orphan_rules_cleanup → unchanged（规则干净）。
 - optimize 已移植 **20/21** 处理器。
+
+---
+
+<a name="optimize-7l"></a>
+## optimize 优化维护（模块7第十二片：login_items_audit —— 21/21 收官）
+
+### 对标记录
+
+- `opt_login_items_audit` 1:1：osascript System Events 快照（name\tPOSIX path）→ 逐项 `_login_item_app_exists`（路径 → mdfind 三段名 → 文件系统按名 → bundle 元数据 → sfltool BTM 仅 sudo -n）→ 损坏 0 → Unchanged，否则 Attention（只读审计，不删除）。
+- `_login_item_name_matches` / `strip_helper_suffix`（Client|Helper|Agent|Launcher|Service$）1:1。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| 快照 | osascript heredoc | osascript -e 单行脚本 | 无行为变更 | 输出契约相同（tab 分隔） |
+| 测试模式跳过 | MOLE_TEST_NO_AUTH → Skipped | 无（GUI 无测试模式环境变量） | **省略** | 冒烟列表排除该项；真机首次运行需 TCC 自动化授权 |
+| BTM 回退 | sudo -n sfltool dumpbtm + awk | 相同语义（行扫描找 .app 路径） | 无行为变更 | 仅密码缓存时启用 |
+| 结果语义 | 损坏 → Attention | 相同 | 无行为变更 | 审计只读，引导用户去系统设置处理 |
+
+### 测试
+
+- 137 个测试通过（新增：全部 21 项 implemented、名称匹配矩阵、helper 后缀剥离）。
+- 真机 dry-run 冒烟（排除 login_items_audit——无 TCC 授权）：全部非 Failed。
+- **optimize 模块 21/21 处理器移植完成。**
