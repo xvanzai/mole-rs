@@ -1079,3 +1079,26 @@
 ### 测试
 
 - 183 个测试通过（新增：plist 整数提取、purgeable 差值、disk metadata 解析、collect_disks 双模式、洞察条目唯一、快照日期行计数）。
+
+---
+
+<a name="clean-age-open-deno"></a>
+## clean 深度清理：Mail Downloads 龄过滤 + incomplete downloads + Deno root
+
+### 对标记录
+
+- **Mail Downloads 龄过滤**：ScanEntry.age_days=30（对标 MOLE_MAIL_AGE_DAYS）；扫描期 mtime 过滤——预览即为可删集（原实现执行期过滤，GUI 预览完整性优先的差异已消除）。
+- **incomplete downloads**：Downloads 下 *.download/*.crdownload/*.part；lsof 开句柄三态——有句柄/无法判定均跳过；仅 conclusively idle 走 Trash（对标 _clean_incomplete_downloads + _mole_paths_have_open_handle）。
+- **Deno root**：mole_deno_cache_root 1:1——DENO_DIR 设置时必须绝对路径；拒绝 .. / ./ / // 与 HOME/Caches 等根；当前 catalog 用显式路径故 Deno 已不在删除路径，函数供未来宽扫排除。
+
+### 变更前后对照
+
+| 项 | 原实现 | Rust 实现 | 是否变更 | 原因 |
+|----|--------|----------|---------|------|
+| Mail 龄 | 执行期过滤 | 扫描期过滤 | **简化** | GUI 预览即结果，避免"预览可删/执行跳过"不一致 |
+| incomplete 身份绑定 | _mole_snapshot_path_identity | lsof 按路径 | **简化** | sink 已复检存在性/保护；身份绑定防 TOCTOU 留待后续 |
+| lsof 可见性 | _mole_complete_lsof_mode | 简化为 lsof 存在性 | **简化** | 完整进程视图检查依赖复杂 lsof 模式门控 |
+
+### 测试
+
+- 185 个测试通过（新增：年龄过滤语义、Deno root 安全拒绝）。

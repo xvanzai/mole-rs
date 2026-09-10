@@ -161,6 +161,7 @@ pub fn chromium_old_version_entries() -> Vec<ScanEntry> {
                     description: format!("{label} old version {name}"),
                     process_probe: Some(probe),
                     sw_domain_guard: false,
+                    age_days: 0,
                 });
             }
         }
@@ -240,6 +241,7 @@ pub fn edge_updater_old_version_entries() -> Vec<ScanEntry> {
             description: format!("Edge updater old version {name}"),
             process_probe: Some(process::microsoft_edge_process_state),
             sw_domain_guard: false,
+            age_days: 0,
         });
     }
     rows

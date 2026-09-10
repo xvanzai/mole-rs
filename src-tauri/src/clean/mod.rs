@@ -259,6 +259,9 @@ pub(super) struct ScanEntry {
     /// Service Worker 域名保护：true 时从路径 basename 提取域名并对照
     /// PROTECTED_SW_DOMAINS（对标 clean_service_worker_cache 的 domain 检查）。
     pub(super) sw_domain_guard: bool,
+    /// mtime 年龄门（天）：>0 时仅收 mtime 早于该天数的目标
+    /// （对标 Mail Downloads 的 MOLE_MAIL_AGE_DAYS=30 过滤）。
+    pub(super) age_days: u64,
 }
 
 /// PROTECTED_SW_DOMAINS（对标 bin/clean.sh）：Web 编辑器 / Google Workspace /
@@ -346,6 +349,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
             description: desc.to_string(),
             process_probe: None,
             sw_domain_guard: false,
+            age_days: 0,
         });
     }
     if npm_custom {
@@ -360,6 +364,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
                     description: format!("{desc} (custom path)"),
                     process_probe: None,
                     sw_domain_guard: false,
+                    age_days: 0,
                 });
             }
         }
@@ -373,6 +378,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
             description: "uv cache".into(),
             process_probe: None,
             sw_domain_guard: false,
+            age_days: 0,
         });
     }
 
@@ -385,6 +391,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
                 description: "Corepack cache".into(),
                 process_probe: None,
                 sw_domain_guard: false,
+                age_days: 0,
             });
         }
     }
@@ -396,6 +403,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
         description: "mise cache".into(),
         process_probe: None,
         sw_domain_guard: false,
+        age_days: 0,
     });
 
     // Cargo registry/cache（对标 clean_dev_rust）：owner 进程守卫 +
@@ -412,6 +420,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
             description: "UTM app cache".into(),
             process_probe: Some(process::utm_process_state),
             sw_domain_guard: false,
+            age_days: 0,
         });
     }
     if Path::new(&home)
@@ -425,6 +434,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
             description: "UTM sandbox cache".into(),
             process_probe: Some(process::utm_process_state),
             sw_domain_guard: false,
+            age_days: 0,
         });
         rows.push(ScanEntry {
             family: "virtualization",
@@ -433,6 +443,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
             description: "UTM temporary files".into(),
             process_probe: Some(process::utm_process_state),
             sw_domain_guard: false,
+            age_days: 0,
         });
     }
 
@@ -449,6 +460,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
                         description: format!("Dropbox cache · {name}"),
                         process_probe: Some(process::dropbox_process_state),
                         sw_domain_guard: false,
+                        age_days: 0,
                     });
                 }
             }
@@ -464,6 +476,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
             description: "Google Drive cache".into(),
             process_probe: Some(process::google_drive_process_state),
             sw_domain_guard: false,
+            age_days: 0,
         });
     }
     if Path::new(&home)
@@ -476,6 +489,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
             description: "OneDrive cache".into(),
             process_probe: Some(process::onedrive_process_state),
             sw_domain_guard: false,
+            age_days: 0,
         });
     }
 
@@ -500,6 +514,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
                     description: format!("Recent items list · {name}"),
                     process_probe: None,
                     sw_domain_guard: false,
+                    age_days: 0,
                 });
             }
         }
@@ -513,12 +528,12 @@ fn dynamic_entries() -> Vec<ScanEntry> {
             description: "Recent items preferences".into(),
             process_probe: None,
             sw_domain_guard: false,
+            age_days: 0,
         });
     }
 
-    // Mail Downloads（对标 _clean_mail_downloads；Mail 运行中跳过；30 天阈值在
-    // 执行期由 mtime 过滤——此处展开整个目录，扫描期不按龄过滤以保持 GUI 预览
-    // 完整性；对标差异记 CHANGES.md）。
+    // Mail Downloads（对标 _clean_mail_downloads；Mail 运行中跳过；
+    // MOLE_MAIL_AGE_DAYS=30 mtime 过滤——扫描期过滤，预览即为可删集）。
     for mail_dir in [
         format!("{home}/Library/Mail Downloads"),
         format!("{home}/Library/Containers/com.apple.mail/Data/Library/Mail Downloads"),
@@ -530,9 +545,14 @@ fn dynamic_entries() -> Vec<ScanEntry> {
                 description: format!("Mail downloads · {}", Path::new(&mail_dir).file_name().unwrap_or_default().to_string_lossy()),
                 process_probe: Some(process::mail_process_state),
                 sw_domain_guard: false,
+                age_days: 30,
             });
         }
     }
+
+    // incomplete downloads（对标 _clean_incomplete_downloads）：lsof 开句柄
+    // 三态——Running/Unknown 跳过；仅 conclusively idle 走 Trash。
+    rows.extend(incomplete_download_entries());
 
     // Service Worker CacheStorage（对标 clean_service_worker_cache 的 profile 遍历）。
     rows.extend(service_worker_entries());
@@ -549,6 +569,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
                     description: format!("Group Container contentdelivery {sub}"),
                     process_probe: None,
                     sw_domain_guard: false,
+                    age_days: 0,
                 });
             }
         }
@@ -631,6 +652,7 @@ fn service_worker_entries() -> Vec<ScanEntry> {
                     ),
                     process_probe: None,
                     sw_domain_guard: true,
+                    age_days: 0,
                 });
                 if let Ok(subs) = std::fs::read_dir(origin.path()) {
                     for sub in subs.flatten() {
@@ -645,6 +667,7 @@ fn service_worker_entries() -> Vec<ScanEntry> {
                                 ),
                                 process_probe: None,
                                 sw_domain_guard: true,
+                                age_days: 0,
                             });
                         }
                     }
@@ -746,6 +769,7 @@ fn app_support_regenerable_entries() -> Vec<ScanEntry> {
                 description: format!("{app_name} · {sub}"),
                 process_probe: None,
                 sw_domain_guard: false,
+                age_days: 0,
             });
         }
     }
@@ -777,6 +801,7 @@ fn cargo_registry_entry() -> Option<ScanEntry> {
         description: "Rust cargo cache".into(),
         process_probe: Some(process::rust_build_process_state),
         sw_domain_guard: false,
+        age_days: 0,
     })
 }
 
@@ -811,6 +836,7 @@ fn guarded_browser_entries() -> Vec<ScanEntry> {
                 description: desc.to_string(),
                 process_probe: Some(process::google_chrome_process_state),
                 sw_domain_guard: false,
+                age_days: 0,
             });
         }
     }
@@ -823,6 +849,7 @@ fn guarded_browser_entries() -> Vec<ScanEntry> {
             description: "Firefox cache".into(),
             process_probe: Some(process::firefox_process_state),
             sw_domain_guard: false,
+            age_days: 0,
         });
         rows.push(ScanEntry {
             family: "browser",
@@ -831,6 +858,7 @@ fn guarded_browser_entries() -> Vec<ScanEntry> {
             description: "Firefox profile cache".into(),
             process_probe: Some(process::firefox_process_state),
             sw_domain_guard: false,
+            age_days: 0,
         });
     }
 
@@ -866,6 +894,7 @@ fn guarded_browser_entries() -> Vec<ScanEntry> {
                 description: desc.to_string(),
                 process_probe: Some(process::arc_process_state),
                 sw_domain_guard: false,
+                age_days: 0,
             });
         }
     }
@@ -893,6 +922,7 @@ fn guarded_browser_entries() -> Vec<ScanEntry> {
                 description: desc.to_string(),
                 process_probe: Some(process::brave_process_state),
                 sw_domain_guard: false,
+                age_days: 0,
             });
         }
     }
@@ -916,6 +946,7 @@ fn guarded_browser_entries() -> Vec<ScanEntry> {
                 description: desc.to_string(),
                 process_probe: Some(process::dia_process_state),
                 sw_domain_guard: false,
+                age_days: 0,
             });
         }
     }
@@ -941,6 +972,7 @@ fn guarded_browser_entries() -> Vec<ScanEntry> {
                 description: desc.to_string(),
                 process_probe: Some(process::vivaldi_process_state),
                 sw_domain_guard: false,
+                age_days: 0,
             });
         }
     }
@@ -964,11 +996,122 @@ fn guarded_browser_entries() -> Vec<ScanEntry> {
                 description: desc.to_string(),
                 process_probe: Some(process::qqbrowser3_process_state),
                 sw_domain_guard: false,
+                age_days: 0,
             });
         }
     }
 
     rows
+}
+
+/// 对标 _clean_incomplete_downloads：Downloads 下 *.download/*.crdownload/*.part。
+/// 开句柄三态在 scan/execute 通过 process_probe 风格的 lsof 检查实现
+///（见 incomplete_download_probe）。
+fn incomplete_download_entries() -> Vec<ScanEntry> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let dl = PathBuf::from(&home).join("Downloads");
+    if !dl.is_dir() {
+        return Vec::new();
+    }
+    let labels = [
+        ("*.download", "Safari incomplete downloads"),
+        ("*.crdownload", "Chrome incomplete downloads"),
+        ("*.part", "Partial incomplete downloads"),
+    ];
+    labels
+        .iter()
+        .map(|(pat, desc)| ScanEntry {
+            family: "user_essentials",
+            pattern: dl.join(pat),
+            description: desc.to_string(),
+            // 用 lsof 开句柄探针替代应用进程探针。
+            process_probe: Some(incomplete_download_open_probe),
+            sw_domain_guard: false,
+            age_days: 0,
+        })
+        .collect()
+}
+
+/// lsof 开句柄三态（对标 _mole_paths_have_open_handle 的简化）：
+/// Running=有句柄，Idle=无句柄，Unknown=lsof 不可用/失败。
+fn incomplete_download_open_probe() -> process::ProcessState {
+    // 探测用通配路径不精确；真实检查在 per-file 扫描时做。
+    // 此处返回 Idle 允许展开条目，单文件 open 检查在 skip_reason 扩展。
+    process::ProcessState::Idle
+}
+
+/// 单路径是否有打开句柄（对标 _mole_paths_have_open_handle）。
+/// 返回 Some(true)=有句柄，Some(false)=无句柄，None=无法判定。
+fn path_has_open_handle(path: &str) -> Option<bool> {
+    if !crate::clean::command_exists("lsof") {
+        return None;
+    }
+    let out = crate::status::run_cmd("lsof", &["-F", "n", "--", path], Duration::from_secs(3));
+    match out {
+        Ok(o) => {
+            // lsof 退出 0 = 有打开；字段记录含 \nn 开头的 file name。
+            Some(o.lines().any(|l| l.starts_with('n') && l.len() > 1) || !o.trim().is_empty())
+        }
+        Err(e) if e.contains("exited with 1") => Some(false), // 无匹配
+        Err(_) => None,
+    }
+}
+
+/// mtime 早于 age_days 的目标过滤（对标 Mail Downloads 龄过滤）。
+fn is_older_than_days(path: &Path, age_days: u64) -> bool {
+    if age_days == 0 {
+        return true;
+    }
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    match modified.elapsed() {
+        Ok(age) => age.as_secs() >= age_days * 86400,
+        Err(_) => false,
+    }
+}
+
+/// 对标 mole_deno_cache_root：DENO_DIR 或 ~/Library/Caches/deno；
+/// 不安全路径（相对、含 ..、等于 HOME/Caches 等）返回 None。
+/// 当前 catalog 使用显式路径而非宽扫 Library/Caches，故 Deno 本身
+/// 已不在删除路径；此函数供未来宽扫接入排除表。
+#[allow(dead_code)]
+pub(crate) fn deno_cache_root() -> Option<PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    // DENO_DIR 设置时必须是绝对路径；未设置用默认。
+    let raw = match std::env::var("DENO_DIR") {
+        Ok(v) => {
+            if !v.starts_with('/') || v.chars().any(|c| c.is_control()) {
+                return None;
+            }
+            v
+        }
+        Err(_) => format!("{home}/Library/Caches/deno"),
+    };
+    let trimmed = raw.trim_end_matches('/');
+    if trimmed.is_empty() || trimmed == "/" {
+        return None;
+    }
+    if trimmed.contains("/../") || trimmed.ends_with("/..") || trimmed.contains("/./") || trimmed.contains("//") {
+        return None;
+    }
+    let home_root = home.trim_end_matches('/');
+    for forbidden in [
+        "",
+        "/",
+        home_root,
+        &format!("{home_root}/Library"),
+        &format!("{home_root}/Library/Caches"),
+        &format!("{home_root}/.cache"),
+    ] {
+        if trimmed == forbidden {
+            return None;
+        }
+    }
+    Some(PathBuf::from(trimmed))
 }
 
 /// 汇总静态目录、动态探测行与进程守卫行。
@@ -981,6 +1124,7 @@ fn collect_entries() -> Vec<ScanEntry> {
             description: entry.description.to_string(),
             process_probe: None,
             sw_domain_guard: false,
+            age_days: 0,
         })
         .collect();
     entries.extend(dynamic_entries());
@@ -1017,6 +1161,40 @@ pub fn scan_preview() -> CleanPreview {
                     skip_reason: reason.to_string(),
                 });
                 continue;
+            }
+            // 年龄门（对标 Mail Downloads MOLE_MAIL_AGE_DAYS）。
+            if entry.age_days > 0 && !is_older_than_days(&target, entry.age_days) {
+                skipped += 1;
+                items.push(CleanItem {
+                    path: target_str,
+                    size_bytes: 0,
+                    skip_reason: format!("未满 {} 天", entry.age_days),
+                });
+                continue;
+            }
+            // incomplete downloads：单文件 lsof 开句柄检查。
+            if entry.description.contains("incomplete") {
+                match path_has_open_handle(&target_str) {
+                    Some(true) => {
+                        skipped += 1;
+                        items.push(CleanItem {
+                            path: target_str,
+                            size_bytes: 0,
+                            skip_reason: "下载进行中（有打开句柄）".into(),
+                        });
+                        continue;
+                    }
+                    None => {
+                        skipped += 1;
+                        items.push(CleanItem {
+                            path: target_str,
+                            size_bytes: 0,
+                            skip_reason: "开句柄检查不可用".into(),
+                        });
+                        continue;
+                    }
+                    Some(false) => {}
+                }
             }
             // 保护检查在扫描期同样执行：受保护/白名单路径永远不会出现在
             // 可清理列表（对标 _safe_clean_impl 的逐路径检查顺序）。
@@ -1146,6 +1324,40 @@ pub fn execute_clean(selected_groups: &[String], dry_run: bool) -> CleanExecuteR
         }
         for target in expand_glob(&entry.pattern) {
             let target_str = target.to_string_lossy().to_string();
+            // Sink 前年龄门复检。
+            if entry.age_days > 0 && !is_older_than_days(&target, entry.age_days) {
+                outcomes.push(DeleteOutcome {
+                    path: target_str,
+                    status: "skipped".into(),
+                    size_bytes: 0,
+                    detail: format!("未满 {} 天", entry.age_days),
+                });
+                continue;
+            }
+            // incomplete downloads：sink 前开句柄复检（对标 guarded + final recheck）。
+            if entry.description.contains("incomplete") {
+                match path_has_open_handle(&target_str) {
+                    Some(true) => {
+                        outcomes.push(DeleteOutcome {
+                            path: target_str,
+                            status: "skipped".into(),
+                            size_bytes: 0,
+                            detail: "下载进行中（有打开句柄）".into(),
+                        });
+                        continue;
+                    }
+                    None => {
+                        outcomes.push(DeleteOutcome {
+                            path: target_str,
+                            status: "skipped".into(),
+                            size_bytes: 0,
+                            detail: "开句柄检查不可用".into(),
+                        });
+                        continue;
+                    }
+                    Some(false) => {}
+                }
+            }
             // Sink 复检：扫描与执行之间状态可能变化（对标 sink re-verify）。
             if let Some(reason) = skip_reason(&target_str, &whitelist, entry.sw_domain_guard) {
                 outcomes.push(DeleteOutcome {
@@ -1318,6 +1530,30 @@ mod tests {
                 entry.description
             );
         }
+    }
+
+    /// 年龄过滤：age_days=0 恒真；未来 mtime 为假。
+    #[test]
+    fn age_filter_semantics() {
+        let tmp = std::env::temp_dir().join(format!("mole_rs_age_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert!(is_older_than_days(&tmp, 0));
+        // 新文件不满足 >0 天。
+        assert!(!is_older_than_days(&tmp, 30));
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Deno root：不安全路径拒绝。
+    #[test]
+    fn deno_root_safety() {
+        unsafe { std::env::remove_var("DENO_DIR") };
+        // 默认 ~/Library/Caches/deno 存在时返回 Some；不 panic。
+        let _ = deno_cache_root();
+        unsafe { std::env::set_var("DENO_DIR", "/") };
+        assert!(deno_cache_root().is_none());
+        unsafe { std::env::set_var("DENO_DIR", "relative/path") };
+        assert!(deno_cache_root().is_none());
+        unsafe { std::env::remove_var("DENO_DIR") };
     }
 
     /// 进程守卫字段：浏览器守卫行必须带 probe；静态 catalog 行不带。
