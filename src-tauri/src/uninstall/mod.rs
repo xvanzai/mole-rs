@@ -11,6 +11,7 @@ pub mod steam;
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// 应用清单条目。
 #[derive(Debug, Clone, Serialize)]
@@ -813,6 +814,83 @@ pub fn surviving_sibling_names(bundle_id: &str, app_path: &str) -> Vec<String> {
     names
 }
 
+/// sudo -n 是否可用（对标 optimize_sudo_available 的 GUI 语义）。
+fn sudo_n_available() -> bool {
+    crate::status::run_cmd("sudo", &["-n", "true"], Duration::from_secs(3)).is_ok()
+}
+
+/// 对标 find_app_system_files：扫描系统级 LaunchAgents/Daemons、
+/// PrivilegedHelperTools、Receipts（需 sudo -n 读取；无缓存返回空）。
+/// 仅 bundle_id 边界匹配；com.apple.* 前缀跳过。
+fn system_files_scan(bundle_id: &str, app_name: &str) -> Vec<String> {
+    if !is_reverse_dns_bundle_id(bundle_id) || !sudo_n_available() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let boundary = name_starts_with_bundle_id_boundary; // 复用现有边界检查
+
+    // LaunchAgents / LaunchDaemons 下 *.plist（对标 batch.sh 432-456）。
+    for root in ["/Library/LaunchAgents", "/Library/LaunchDaemons"] {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.ends_with(".plist") {
+                continue;
+            }
+            if name.starts_with("com.apple.") {
+                continue;
+            }
+            let path = entry.path().to_string_lossy().to_string();
+            if boundary(&name, bundle_id) {
+                out.push(path);
+            }
+        }
+    }
+
+    // PrivilegedHelperTools：bundle_id 边界 + 名称变体（≥5 字符）。
+    if let Ok(entries) = std::fs::read_dir("/Library/PrivilegedHelperTools") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("com.apple.") {
+                continue;
+            }
+            let path = entry.path().to_string_lossy().to_string();
+            if boundary(&name, bundle_id) {
+                out.push(path);
+                continue;
+            }
+            // 名称变体（对标 helper_name_variants；≥5 字符、非通用词）。
+            if !is_common_app_name(app_name) {
+                let lower = app_name.to_lowercase();
+                let nospace: String = app_name.chars().filter(|c| *c != ' ').collect();
+                for variant in [lower, nospace.to_lowercase()] {
+                    if variant.len() >= 5 && name.to_lowercase().contains(&variant) {
+                        out.push(path.clone());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Receipts（/private/var/db/receipts *.bom/*.plist）。
+    if let Ok(entries) = std::fs::read_dir("/private/var/db/receipts") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !(name.ends_with(".bom") || name.ends_with(".plist")) {
+                continue;
+            }
+            let stem = name.trim_end_matches(".bom").trim_end_matches(".plist");
+            if boundary(stem, bundle_id) {
+                out.push(entry.path().to_string_lossy().to_string());
+            }
+        }
+    }
+    out
+}
+
 pub fn uninstall_app(app_path: &str, bundle_id: &str, dry_run: bool) -> crate::clean::CleanExecuteResult {
     let mut outcomes = Vec::new();
     let mut deleted_count = 0usize;
@@ -903,6 +981,13 @@ pub fn uninstall_app(app_path: &str, bundle_id: &str, dry_run: bool) -> crate::c
             let p = Path::new(&residue);
             if p.exists() || p.is_symlink() {
                 targets.push(residue);
+            }
+        }
+        // 系统级 LaunchAgents/Daemons/PrivilegedHelperTools/Receipts
+        // （对标 find_app_system_files；sudo -n 读取，无缓存时跳过）。
+        for sys in system_files_scan(bundle_id, &app_name) {
+            if !targets.contains(&sys) {
+                targets.push(sys);
             }
         }
     }
@@ -1266,6 +1351,16 @@ mod variant_tests {
         assert_eq!(insert_camel_spaces("HTMLParser"), "HTML Parser");
         assert_eq!(insert_camel_spaces("simple"), "simple");
         assert_eq!(insert_camel_spaces("A1B2"), "A1 B2");
+    }
+
+    /// 系统文件扫描：无 sudo 或非法 bundle → 空；有 sudo 时不 panic。
+    #[test]
+    fn system_files_scan_guards() {
+        assert!(system_files_scan("", "Foo").is_empty());
+        assert!(system_files_scan("unknown", "Foo").is_empty());
+        assert!(system_files_scan("com.example.Foo", "Foo").is_empty() || !sudo_n_available());
+        // 不 panic。
+        let _ = system_files_scan("com.example.Something", "Something");
     }
 }
 

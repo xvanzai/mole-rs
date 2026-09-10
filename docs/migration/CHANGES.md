@@ -1192,3 +1192,26 @@
 ### 测试
 
 - 189 个测试通过（新增：Metal 目录匹配矩阵、族含 Metal/安装器）。
+
+---
+
+<a name="uninstall-system-files"></a>
+## uninstall 应用卸载：系统级 LaunchAgents/Daemons/Helpers/Receipts
+
+### 对标记录
+
+- `find_app_system_files` 核心 1:1：/Library/LaunchAgents、/Library/LaunchDaemons 下 *.plist（bundle_id 边界匹配，com.apple.* 跳过）；/Library/PrivilegedHelperTools（bundle_id 边界 + 名称变体 ≥5 字符）；/private/var/db/receipts *.bom/*.plist（bundle_id 边界）。
+- sudo -n 门控：无密码缓存时扫描返回空（GUI 约束）。
+- 兄弟守卫：sibling 存在时名称变体抑制（仅 bundle_id 边界路径）。
+
+### 变更前后对照
+
+| 项 | 原实现 | Rust 实现 | 是否变更 | 原因 |
+|----|--------|----------|---------|------|
+| 扫描 | find -print0 + sudo | read_dir + sudo -n 读取 | 无行为变更 | — |
+| 身份绑定 | _mole_snapshot_path_identity | 不做身份绑定 | **简化** | sink 已复检存在性/保护 |
+| Raycast 特例 | /Library/Application Support 扫描 | **未实现** | **暂缓** | 厂商特例独立小片 |
+
+### 测试
+
+- 190 个测试通过（新增：系统文件扫描守卫矩阵）。
