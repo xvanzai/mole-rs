@@ -197,6 +197,8 @@ pub struct Collector {
     gpu_cache: gpu::GpuCache,
     // 蓝牙 30s 缓存（对标 lastBT/lastBTAt）。
     bt_cache: bluetooth::BluetoothCache,
+    // 磁盘 IO 差分状态（对标 prevDiskIO/lastDiskAt）。
+    prev_disk_io: Option<disk::DiskIoPrev>,
 
     // 废纸篓大小缓存（5s），对标 trashSizeCache。
     trash_cache: Option<(u64, bool, Instant)>,
@@ -280,6 +282,7 @@ impl Collector {
             power_cache: battery::PowerCache::default(),
             gpu_cache: gpu::GpuCache::default(),
             bt_cache: bluetooth::BluetoothCache::default(),
+            prev_disk_io: None,
             trash_cache: None,
             ready: false,
             last_full_at: None,
@@ -351,11 +354,12 @@ impl Collector {
         let disks = disk::collect_disks(false);
         let network = self.collect_network();
         let uptime_secs = boot_uptime_secs();
+        let disk_io = disk::collect_disk_io(&mut self.prev_disk_io);
         let (health_score, health_score_msg) = health::calculate_health_score(
             &cpu,
             &memory,
             &disks,
-            &[0.0, 0.0],
+            &[disk_io.read_rate, disk_io.write_rate],
             &ThermalStatus::default(),
             uptime_secs,
         );
@@ -376,7 +380,7 @@ impl Collector {
             disks,
             trash_size: 0,
             trash_approx: false,
-            disk_io: DiskIoStatus::default(),
+            disk_io,
             network,
             network_history: NetworkHistory {
                 rx_history: self.rx_history.slice(),
@@ -409,6 +413,7 @@ impl Collector {
         let gpu_list = gpu::collect_gpu(&mut self.gpu_cache);
         let bluetooth_list = bluetooth::collect_bluetooth(&mut self.bt_cache);
         let proxy = network::collect_proxy();
+        let disk_io = disk::collect_disk_io(&mut self.prev_disk_io);
 
         // 硬件信息缓存 10 分钟（对标 snapshotFromMetrics 的 refreshHardware）。
         let hw_expired = self
@@ -427,7 +432,7 @@ impl Collector {
             &cpu,
             &memory,
             &disks,
-            &[0.0, 0.0],
+            &[disk_io.read_rate, disk_io.write_rate],
             &thermal,
             &batteries,
             uptime_secs,
@@ -449,7 +454,7 @@ impl Collector {
             disks,
             trash_size: trash.0,
             trash_approx: trash.1,
-            disk_io: DiskIoStatus::default(),
+            disk_io,
             network,
             network_history: NetworkHistory {
                 rx_history: self.rx_history.slice(),

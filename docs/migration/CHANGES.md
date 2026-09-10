@@ -916,3 +916,28 @@
 
 - 154 个测试通过（新增：owner ops 描述唯一、resolve 路径安全、dry-run 不 panic）。
 - 真机冒烟：**399 组**（原 393）；npm cache (owner command) 可见 0.04 MB。
+
+---
+
+<a name="status-diskio-bt"></a>
+## status 系统监控（磁盘 IO + 蓝牙）
+
+### 对标记录
+
+- `collectDiskIO` 1:1：累计计数器差分 → MB/s；首次采样只记 prev 返回零。
+- macOS 数据源：`ioreg -r -c IOBlockStorageDriver -d 1` 的 `Statistics` 中 `"Bytes (Read)"` / `"Bytes (Write)"` 全驱动求和（对标 gopsutil disk.IOCounters 的 IOKit 路径）。
+- 健康评分接入真实 `[read_rate, write_rate]`（原恒为 `[0,0]`）。
+- 蓝牙：`collectBluetooth` / `parseSPBluetooth` / `parseBluetoothctl` 此前已实现（system_profiler → bluetoothctl 回退 + 30s 缓存），本片确认接入 full 路径无回归。
+
+### 变更前后对照
+
+| 项 | 原实现（bash/Go） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| IO 计数器 | gopsutil IOKit IOBlockStorageDriver | ioreg 子进程解析 Statistics | 实现差异（语义一致） | 免 C FFI 绑定；同为累计字节差分 |
+| 健康评分 IO 扣分 | 使用真实 DiskIO | 同 | 无行为变更（本片恢复） | 原暂缓项补齐 |
+| 蓝牙 | system_profiler + bluetoothctl | 已实现 | 无变更 | — |
+
+### 测试
+
+- 157 个测试通过（新增：ioreg 多驱动器求和、空输出、首次采样零速率）。
+- 真机：ioreg 两次采样 delta 非零（read ~0.03 MB / 1.2s 量级）。

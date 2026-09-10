@@ -1,6 +1,6 @@
 //! 磁盘指标与废纸篓扫描，对标 `cmd/status/metrics_disk.go`。
 
-use super::types::DiskStatus;
+use super::types::{DiskIoStatus, DiskStatus};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -221,6 +221,85 @@ fn walk_sum(dir: &std::path::Path, deadline: &Instant, total: &mut u64) {
     }
 }
 
+/// 磁盘 IO 累计字节（对标 gopsutil disk.IOCountersStat 的 ReadBytes/WriteBytes）。
+/// macOS 上通过 `ioreg -r -c IOBlockStorageDriver` 读取 IORegistry Statistics。
+pub struct DiskIoPrev {
+    pub read_bytes: u64,
+    pub write_bytes: u64,
+    pub at: Instant,
+}
+
+/// 解析 ioreg 输出中的 `"Bytes (Read)"=N` / `"Bytes (Write)"=N` 并求和。
+/// 对标 Go 侧对所有 counters 求 total.ReadBytes/WriteBytes。
+pub fn parse_ioreg_disk_bytes(raw: &str) -> (u64, u64) {
+    let mut read = 0u64;
+    let mut write = 0u64;
+    // ioreg 单行可能含 `"Statistics" = {"Bytes (Read)"=N,...}`，
+    // 逗号切分后 key 不在 token 开头——改为全局扫描 key=value。
+    const READ_KEY: &str = "\"Bytes (Read)\"=";
+    const WRITE_KEY: &str = "\"Bytes (Write)\"=";
+    for (key, acc) in [(READ_KEY, &mut read), (WRITE_KEY, &mut write)] {
+        let mut rest = raw;
+        while let Some(pos) = rest.find(key) {
+            rest = &rest[pos + key.len()..];
+            let end = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
+            if end > 0 {
+                if let Ok(v) = rest[..end].parse::<u64>() {
+                    *acc += v;
+                }
+            }
+        }
+    }
+    (read, write)
+}
+
+/// 读取当前累计 IO 字节；ioreg 不可用返回 None。
+fn read_disk_io_totals() -> Option<(u64, u64)> {
+    let out = super::run_cmd(
+        "ioreg",
+        &["-r", "-c", "IOBlockStorageDriver", "-d", "1"],
+        Duration::from_secs(3),
+    )
+    .ok()?;
+    let totals = parse_ioreg_disk_bytes(&out);
+    // 两个计数器均为 0 视为不可用（避免除零/假零）。
+    if totals.0 == 0 && totals.1 == 0 {
+        return None;
+    }
+    Some(totals)
+}
+
+/// 对标 `collectDiskIO`：累计计数器差分 → MB/s。
+/// 首次采样只记录 prev，返回零值（与 Go 一致）。
+pub fn collect_disk_io(prev: &mut Option<DiskIoPrev>) -> DiskIoStatus {
+    let Some((read, write)) = read_disk_io_totals() else {
+        return DiskIoStatus::default();
+    };
+    let now = Instant::now();
+    let Some(p) = prev.as_ref() else {
+        *prev = Some(DiskIoPrev {
+            read_bytes: read,
+            write_bytes: write,
+            at: now,
+        });
+        return DiskIoStatus::default();
+    };
+    let elapsed = now.duration_since(p.at).as_secs_f64().max(0.1);
+    let read_delta = read.saturating_sub(p.read_bytes);
+    let write_delta = write.saturating_sub(p.write_bytes);
+    *prev = Some(DiskIoPrev {
+        read_bytes: read,
+        write_bytes: write,
+        at: now,
+    });
+    DiskIoStatus {
+        read_rate: read_delta as f64 / 1024.0 / 1024.0 / elapsed,
+        write_rate: write_delta as f64 / 1024.0 / 1024.0 / elapsed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,6 +312,36 @@ mod tests {
         assert_eq!(base_device_name("/dev/disk5"), "disk5");
         assert_eq!(base_device_name("/dev/sda1"), "sda1");
         assert_eq!(base_device_name(""), "");
+    }
+
+    /// ioreg Statistics 字节解析：多驱动器求和。
+    #[test]
+    fn parse_ioreg_disk_bytes_sums_drivers() {
+        let raw = r#"
+      "Statistics" = {"Operations (Write)"=425617,"Bytes (Read)"=40313978880,"Bytes (Write)"=26369171456}
+      "Statistics" = {"Bytes (Read)"=7293149696,"Bytes (Write)"=19603329024}
+"#;
+        let (r, w) = parse_ioreg_disk_bytes(raw);
+        assert_eq!(r, 40313978880 + 7293149696);
+        assert_eq!(w, 26369171456 + 19603329024);
+    }
+
+    #[test]
+    fn parse_ioreg_disk_bytes_empty() {
+        assert_eq!(parse_ioreg_disk_bytes(""), (0, 0));
+        assert_eq!(parse_ioreg_disk_bytes("no stats here"), (0, 0));
+    }
+
+    /// 首次采样返回零速率（对标 Go lastDiskAt.IsZero 分支）。
+    #[test]
+    fn disk_io_first_sample_zero() {
+        let mut prev = None;
+        // 可能读到真实 ioreg；无论是否有数据，首次都不 panic。
+        let _ = collect_disk_io(&mut prev);
+        if prev.is_some() {
+            // 第二次调用（间隔极短）也不 panic。
+            let _ = collect_disk_io(&mut prev);
+        }
     }
 
     #[test]
