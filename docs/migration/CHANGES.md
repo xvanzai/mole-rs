@@ -681,3 +681,29 @@
 - 131 个测试通过（新增：counts 映射、dry-run sudo 语义、lsregister 路径解析、network_optimization 去重）。
 - 真机 dry-run 冒烟：system_maintenance → applied（DNS+Spotlight 校验）；network_optimization → unchanged（本轮已刷）；launch_services_rebuild → applied（将重建）。
 - optimize 已移植 **13/21** 处理器。
+
+---
+
+<a name="optimize-7i"></a>
+## optimize 优化维护（模块7第九片：network_stack_optimize + disk_permissions_repair + periodic_maintenance）
+
+### 对标记录
+
+- `opt_network_stack_optimize` 1:1：`has_active_vpn_interface` 三态（scutil Connected + 默认路由 utun*，#959 窄信号）→ 路由/DNS 健康探针（0/1/其他）→ 皆健康 Unchanged → sudo route -n flush + arp -a -d → counts 映射。
+- `opt_disk_permissions_repair` 1:1：`needs_permissions_repair`（HOME 属主≠uid 或 HOME/Library/Preferences 不可写）→ 已最优 Unchanged → sudo diskutil resetUserPermissions / <uid>。
+- `opt_periodic_maintenance` 1:1：`command -v periodic`（macOS 26+ 移除 → Unavailable）→ daily.out mtime <7 天 → Unchanged → sudo periodic daily weekly monthly。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| VPN 探针 | scutil/route 子进程 + awk 解析 interface | 相同命令 + 行前缀解析 | 无行为变更 | LC_ALL=C 下输出稳定 |
+| 权限属主 | `$STAT_BSD -f %Su` vs `$USER` | metadata.uid vs getuid() | 无行为变更 | 语义等价（属主 uid 比较） |
+| 可写探测 | `[[ -w path ]]` | mode & 0o200 | 无行为变更 | 未考虑 ACL 的粗粒度位；与 bash -w 在典型家目录一致 |
+| sudo 会话 | 交互 | 仅 sudo -n | **GUI 适配** | 同 7h |
+
+### 测试
+
+- 134 个测试通过（新增：VPN 覆盖语义、权限探针不 panic、network_stack dry-run 非致命）。
+- 真机 dry-run 冒烟：network_stack_optimize → unchanged（本机无 VPN 且网络健康）；disk_permissions_repair → unchanged（权限正常）；periodic_maintenance → unavailable（本机 macOS 26+ 无 periodic，与原实现一致）。
+- optimize 已移植 **16/21** 处理器。

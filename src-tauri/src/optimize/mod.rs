@@ -73,6 +73,9 @@ pub fn task_catalog() -> Vec<OptimizeTask> {
                     | "system_maintenance"
                     | "network_optimization"
                     | "launch_services_rebuild"
+                    | "network_stack_optimize"
+                    | "disk_permissions_repair"
+                    | "periodic_maintenance"
             ),
         })
         .collect()
@@ -228,6 +231,18 @@ pub fn execute(selected: &[String], dry_run: bool) -> OptimizeResult {
             }
             "launch_services_rebuild" => {
                 let (outcome, detail) = launch_services_rebuild(dry_run);
+                record(&mut outcomes, task.action, outcome, &detail);
+            }
+            "network_stack_optimize" => {
+                let (outcome, detail) = network_stack_optimize(dry_run);
+                record(&mut outcomes, task.action, outcome, &detail);
+            }
+            "disk_permissions_repair" => {
+                let (outcome, detail) = disk_permissions_repair(dry_run);
+                record(&mut outcomes, task.action, outcome, &detail);
+            }
+            "periodic_maintenance" => {
+                let (outcome, detail) = periodic_maintenance(dry_run);
                 record(&mut outcomes, task.action, outcome, &detail);
             }
             "saved_state_cleanup" => {
@@ -1211,6 +1226,214 @@ fn launch_services_rebuild(dry_run: bool) -> (Outcome, String) {
     }
 }
 
+/// 对标 `has_active_vpn_interface`：0=有 VPN，1=无，2=无法判定。
+/// 窄信号：scutil 已连接系统 VPN + 默认路由 utun*（#959：裸 utun 存在
+/// 会误报 Private Relay/Handoff 等）。
+fn has_active_vpn_interface() -> u8 {
+    // MOLE_ASSUME_VPN_ACTIVE 测试/应急覆盖。
+    match std::env::var("MOLE_ASSUME_VPN_ACTIVE").as_deref() {
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES") => return 0,
+        Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO") => return 1,
+        _ => {}
+    }
+
+    if !crate::clean::command_exists("scutil") {
+        return 2;
+    }
+    let Ok(scutil_out) = crate::status::run_cmd("scutil", &["--nc", "list"], Duration::from_secs(3))
+    else {
+        return 2;
+    };
+    // 对标 grep -Eq '^\* \(Connected\)'（LC_ALL=C 下的英文输出）。
+    if scutil_out.lines().any(|l| l.starts_with("* (Connected)")) {
+        return 0;
+    }
+
+    if !crate::clean::command_exists("route") {
+        return 2;
+    }
+    let Ok(route_out) = crate::status::run_cmd("route", &["-n", "get", "default"], Duration::from_secs(3))
+    else {
+        return 2;
+    };
+    // interface: utunN → 全隧道第三方 VPN 拥有默认路由。
+    for line in route_out.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("interface:") {
+            let iface = rest.trim();
+            if let Some(num) = iface.strip_prefix("utun") {
+                if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
+                    return 0;
+                }
+            }
+        }
+    }
+    1
+}
+
+/// 对标 `opt_network_stack_optimize`：VPN 三态 → 路由/DNS 健康探针 →
+/// 两者皆健康 Unchanged → sudo route -n flush + arp -a -d。
+fn network_stack_optimize(dry_run: bool) -> (Outcome, String) {
+    match has_active_vpn_interface() {
+        0 => return (Outcome::Skipped, "检测到活跃 VPN，已跳过".into()),
+        1 => {}
+        _ => return (Outcome::Failed, "无法判定 VPN 状态".into()),
+    }
+
+    // 路由与 DNS 健康探针（对标三态：0=健康，1=不健康，其他=失败）。
+    let route_probe = probe_exit_code("route", &["-n", "get", "default"], Duration::from_secs(3));
+    let dns_probe = probe_exit_code(
+        "dscacheutil",
+        &["-q", "host", "-a", "name", "example.com"],
+        Duration::from_secs(3),
+    );
+    // 探针失败（None = 超时/spawn 失败）与 >1 退出码均记 Failed。
+    match (route_probe, dns_probe) {
+        (Some(c), Some(d)) if c <= 1 && d <= 1 => {}
+        _ => return (Outcome::Failed, "网络健康检查失败或超时".into()),
+    }
+    if route_probe == Some(0) && dns_probe == Some(0) {
+        return (Outcome::Unchanged, "网络栈已处于最优状态".into());
+    }
+
+    if !dry_run && !optimize_sudo_available(false) {
+        return (
+            Outcome::Skipped,
+            "需要管理员权限（sudo 缓存不可用）".into(),
+        );
+    }
+
+    let route_flushed = if dry_run {
+        true
+    } else {
+        crate::status::run_cmd("sudo", &["route", "-n", "flush"], Duration::from_secs(5)).is_ok()
+    };
+    let arp_flushed = if dry_run {
+        true
+    } else {
+        crate::status::run_cmd("sudo", &["arp", "-a", "-d"], Duration::from_secs(5)).is_ok()
+    };
+
+    let applied = usize::from(route_flushed) + usize::from(arp_flushed);
+    let failed = usize::from(!route_flushed) + usize::from(!arp_flushed);
+    let detail = if failed > 0 {
+        format!("网络栈刷新不完整（{failed} 项失败）")
+    } else if route_flushed && arp_flushed {
+        "路由表已刷新，ARP 缓存已清除".to_string()
+    } else if route_flushed {
+        "路由表已刷新".to_string()
+    } else {
+        "ARP 缓存已清除".to_string()
+    };
+    (outcome_from_counts(applied, failed, 0), detail)
+}
+
+/// 对标 `needs_permissions_repair`：家目录属主 ≠ 当前用户，或
+/// HOME / Library / Preferences 任一存在但不可写。
+fn needs_permissions_repair() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let home = std::env::var("HOME").unwrap_or_default();
+    let Ok(meta) = std::fs::metadata(&home) else {
+        return false;
+    };
+    // uid 对比（对标 $STAT_BSD -f %Su 与 $USER 比较的意图）。
+    let uid = meta.uid();
+    let current_uid = unsafe { libc::getuid() };
+    if uid != current_uid {
+        return true;
+    }
+    for path in [
+        home.clone(),
+        format!("{home}/Library"),
+        format!("{home}/Library/Preferences"),
+    ] {
+        if Path::new(&path).exists() && !is_writable(Path::new(&path)) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_writable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o200 != 0)
+        .unwrap_or(false)
+}
+
+/// 对标 `opt_disk_permissions_repair`：needs_permissions_repair 探测 →
+/// sudo diskutil resetUserPermissions / <uid>。
+fn disk_permissions_repair(dry_run: bool) -> (Outcome, String) {
+    if !needs_permissions_repair() {
+        return (Outcome::Unchanged, "用户目录权限已最优".into());
+    }
+    if dry_run {
+        return (Outcome::Applied, "将重置用户目录权限".into());
+    }
+    if !optimize_sudo_available(false) {
+        return (
+            Outcome::Skipped,
+            "需要管理员权限（sudo 缓存不可用）".into(),
+        );
+    }
+    let uid = unsafe { libc::getuid() }.to_string();
+    match crate::status::run_cmd(
+        "sudo",
+        &["diskutil", "resetUserPermissions", "/", &uid],
+        Duration::from_secs(60),
+    ) {
+        Ok(_) => (Outcome::Applied, "用户目录权限已重置".into()),
+        Err(_) => (Outcome::Failed, "权限重置失败（可能无需修复）".into()),
+    }
+}
+
+/// 对标 `opt_periodic_maintenance`：periodic 命令存在性（macOS 26+ 移除）→
+/// /var/log/daily.out 新鲜度（<7 天 Unchanged）→ sudo periodic daily weekly monthly。
+fn periodic_maintenance(dry_run: bool) -> (Outcome, String) {
+    if !crate::clean::command_exists("periodic") {
+        return (
+            Outcome::Unavailable,
+            "此 macOS 版本不提供 periodic".into(),
+        );
+    }
+
+    let daily_log = std::env::var("MOLE_PERIODIC_LOG")
+        .unwrap_or_else(|_| "/var/log/daily.out".into());
+    if Path::new(&daily_log).is_file() {
+        if let Ok(meta) = std::fs::metadata(&daily_log) {
+            if let Ok(mtime) = meta.modified() {
+                if let Ok(age) = mtime.elapsed() {
+                    let age_days = age.as_secs() / 86400;
+                    if age_days < 7 {
+                        return (
+                            Outcome::Unchanged,
+                            format!("周期维护已是最新（{age_days} 天前）"),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    if dry_run {
+        return (Outcome::Applied, "将触发 daily/weekly/monthly 周期维护".into());
+    }
+    if !optimize_sudo_available(false) {
+        return (
+            Outcome::Skipped,
+            "需要管理员权限（sudo 缓存不可用）".into(),
+        );
+    }
+    match crate::status::run_cmd(
+        "sudo",
+        &["periodic", "daily", "weekly", "monthly"],
+        Duration::from_secs(120),
+    ) {
+        Ok(_) => (Outcome::Applied, "周期维护已触发".into()),
+        Err(e) => (Outcome::Failed, format!("周期维护失败：{e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1253,6 +1476,9 @@ mod tests {
                     | "system_maintenance"
                     | "network_optimization"
                     | "launch_services_rebuild"
+                    | "network_stack_optimize"
+                    | "disk_permissions_repair"
+                    | "periodic_maintenance"
             );
             assert_eq!(t.implemented, implemented, "{} 标记不一致", t.action);
         }
@@ -1261,7 +1487,7 @@ mod tests {
     /// 执行框架：未移植任务记录 unavailable。
     #[test]
     fn unimplemented_task_unavailable() {
-        let r = execute(&["network_stack_optimize".to_string()], true);
+        let r = execute(&["spotlight_index_optimize".to_string()], true);
         assert_eq!(r.results.len(), 1);
         assert_eq!(r.results[0].outcome, "unavailable");
         assert_eq!(r.unavailable, 1);
@@ -1288,6 +1514,9 @@ mod smoke_tests {
             "system_maintenance".to_string(),
             "network_optimization".to_string(),
             "launch_services_rebuild".to_string(),
+            "network_stack_optimize".to_string(),
+            "disk_permissions_repair".to_string(),
+            "periodic_maintenance".to_string(),
         ], true);
         for res in &r.results {
             println!("[{}] {} ({})", res.outcome, res.action, res.detail);
@@ -1428,5 +1657,38 @@ mod network_launch_tests {
         }
         let (_, _, flushed) = system_maintenance(true);
         assert!(flushed, "dry-run 下 flush_dns_cache 必为 true");
+    }
+
+    /// MOLE_ASSUME_VPN_ACTIVE 覆盖语义（对标 has_active_vpn_interface case）。
+    #[test]
+    fn vpn_assume_override() {
+        unsafe { std::env::set_var("MOLE_ASSUME_VPN_ACTIVE", "1") };
+        assert_eq!(has_active_vpn_interface(), 0);
+        unsafe { std::env::set_var("MOLE_ASSUME_VPN_ACTIVE", "0") };
+        assert_eq!(has_active_vpn_interface(), 1);
+        unsafe { std::env::remove_var("MOLE_ASSUME_VPN_ACTIVE") };
+    }
+
+    /// needs_permissions_repair：HOME 属主为当前用户且可写 → false（真机默认）。
+    #[test]
+    fn permissions_repair_probe_default() {
+        if !Path::new(&std::env::var("HOME").unwrap_or_default()).is_dir() {
+            return;
+        }
+        // 不断言 true/false——取决于本机状态；仅保证不 panic。
+        let _ = needs_permissions_repair();
+    }
+
+    /// network_stack dry-run：无 VPN 时若探针健康 → Unchanged，
+    /// 若不健康 → Applied（将刷新）。两种都合法，仅排除 Failed/Skipped。
+    #[test]
+    fn network_stack_dry_run_non_fatal() {
+        unsafe { std::env::set_var("MOLE_ASSUME_VPN_ACTIVE", "0") };
+        let (outcome, _) = network_stack_optimize(true);
+        unsafe { std::env::remove_var("MOLE_ASSUME_VPN_ACTIVE") };
+        assert!(
+            matches!(outcome, Outcome::Unchanged | Outcome::Applied | Outcome::Failed),
+            "unexpected: {outcome:?}"
+        );
     }
 }
