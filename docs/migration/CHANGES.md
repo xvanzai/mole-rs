@@ -941,3 +941,28 @@
 
 - 157 个测试通过（新增：ioreg 多驱动器求和、空输出、首次采样零速率）。
 - 真机：ioreg 两次采样 delta 非零（read ~0.03 MB / 1.2s 量级）。
+
+---
+
+<a name="analyze-cache"></a>
+## analyze 磁盘分析（缓存层）
+
+### 对标记录
+
+- `cache.go` 核心子集 1:1：schema v3 拒绝陈旧条目；TTL 7 天；超 1000 条按 mtime 淘汰至 900；相同大小且 TTL/8 内跳过写入；唯一临时文件 + rename 持久化。
+- 落点：`~/.cache/mole/analyze/scan_cache.json`（对标 getCacheDir + 命名文件）。
+- 接入：`scan_path` 成功且未 truncated 时写入；新增 `analyze_cached` 命令供 UI 先展示缓存再刷新。
+
+### 变更前后对照
+
+| 项 | 原实现（Go） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| 缓存分层 | overview sizes（JSON）+ 子树 gob 缓存 | 单层 path → ScanResult JSON | **简化** | GUI 按需下钻成本低；重复进入同一目录是主要加速场景 |
+| 编码 | gob（子树）+ JSON（overview） | 全 JSON | 实现差异 | ScanResult 已 Serialize；体积可接受 |
+| truncated 结果 | 按 needsRefresh 决定 | 不入缓存 | **加固** | 部分值不污染后续展示 |
+| Spotlight 预热 | live_scan | 未实现 | **暂缓** | 独立子片 |
+| 快照对比 | snapshots.go | 未实现 | **暂缓** | 独立子片 |
+
+### 测试
+
+- 161 个测试通过（新增：put/get 往返、空值拒绝、淘汰保留最新、磁盘持久化）。

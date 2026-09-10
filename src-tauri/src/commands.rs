@@ -111,6 +111,13 @@ pub mod analyze {
         super::blocking_result(move || crate::analyze::scan_path(&path)).await
     }
 
+    /// 读取路径的缓存扫描结果（TTL 7 天；miss 返回 null）。
+    /// UI 可在重新扫描前先展示缓存，避免空白等待。
+    #[tauri::command]
+    pub async fn analyze_cached(path: String) -> Result<Option<crate::analyze::ScanResult>, String> {
+        super::blocking(move || crate::analyze::cached_scan(&path)).await
+    }
+
     /// 从当前浏览层删除选中条目（仅直接子项，走 Trash 安全删除）。
     #[tauri::command]
     pub async fn analyze_delete(

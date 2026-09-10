@@ -18,6 +18,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
+pub mod cache;
+
 /// 扫描总预算（对标 duTimeout = 30s）。
 const SCAN_DEADLINE: Duration = Duration::from_secs(30);
 /// 大文件保留数（对标 maxLargeFiles）。
@@ -27,7 +29,7 @@ const MAX_LARGE_FILES: usize = 20;
 const MAX_WALKERS: usize = 8;
 
 /// 目录条目（对标 dirEntry；last_access 为 Unix 毫秒）。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct DirEntry {
     pub name: String,
     pub path: String,
@@ -37,7 +39,7 @@ pub struct DirEntry {
 }
 
 /// 大文件条目（对标 fileEntry）。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct FileEntry {
     pub name: String,
     pub path: String,
@@ -45,7 +47,7 @@ pub struct FileEntry {
 }
 
 /// 扫描结果（对标 scanResult + 进度计数）。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct ScanResult {
     pub path: String,
     pub entries: Vec<DirEntry>,
@@ -370,7 +372,7 @@ pub fn scan_path(root: &str) -> Result<ScanResult, String> {
     // 条目按大小降序（对标 TUI 的按大小排序展示）。
     entries.sort_by(|a, b| b.size.cmp(&a.size));
 
-    Ok(ScanResult {
+    let result = ScanResult {
         path: root_path.to_string_lossy().to_string(),
         entries,
         large_files,
@@ -378,7 +380,19 @@ pub fn scan_path(root: &str) -> Result<ScanResult, String> {
         total_files,
         total_dirs,
         truncated,
-    })
+    };
+    // 写入扫描缓存（对标 cache.go 的路径 → 结果 TTL 缓存）。
+    // truncated 结果不入缓存，避免部分值污染后续展示。
+    if !truncated {
+        cache::put(&result.path, &result);
+    }
+    Ok(result)
+}
+
+/// 读取路径的缓存扫描结果（对标 loadStoredOverviewSize 的路径级命中）。
+/// UI 可在重新扫描前先展示缓存，避免空白等待。
+pub fn cached_scan(path: &str) -> Option<ScanResult> {
+    cache::get(path)
 }
 
 /// 从当前浏览层删除选中条目：仅接受 root 的**直接子项**（对标 TUI 在当前

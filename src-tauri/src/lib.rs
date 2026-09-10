@@ -61,6 +61,7 @@ pub fn run() {
             commands::manage::get_purge_paths,
             commands::manage::set_purge_paths,
             commands::analyze::analyze_scan,
+            commands::analyze::analyze_cached,
             commands::analyze::analyze_delete
         ])
         .run(tauri::generate_context!())
