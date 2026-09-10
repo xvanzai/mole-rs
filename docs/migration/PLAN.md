@@ -22,7 +22,7 @@
 |---|------|-----------|----------|-----|------|
 | 1 | core 工具层（字节单位等） | `internal/units/bytes.go` | `src-tauri/src/core/units.rs` | — | ✅ 已完成 |
 | 2 | status 系统监控 | `cmd/status/*.go` | `src-tauri/src/status/` + `src/pages/StatusPage.vue` | 监控仪表盘 | ✅ 全部完成（GPU/蓝牙/磁盘IO/APFS/ProcessWatch） |
-| 3 | clean 深度清理 | `bin/clean.sh`、`lib/clean/*`、`lib/core/app_protection*.sh` | `src-tauri/src/clean/` + `src/pages/CleanPage.vue` | 清理页（预览→执行） | ✅ 3a–3i 完成（白名单、保护层、Trash、动态探测、进程守卫、浏览器、cargo、Apple Silicon/虚拟化/App Support、Service Worker、Cloud&Office、用户基础、浏览器旧版本、Group Containers、owner 命令、deep_system、Mail 龄、incomplete downloads、Deno root、数据库/API/JetBrains/Composer、Gradle、Xcode 文档、Metal GPU、macOS 安装器） |
+| 3 | clean 深度清理 | `bin/clean.sh`、`lib/clean/*`、`lib/core/app_protection*.sh` | `src-tauri/src/clean/` + `src/pages/CleanPage.vue` | 清理页（预览→执行） | ✅ 3a–3j 完成（含 Homebrew/DS_Store/Trash/orphaned stubs/设备固件/TM/大文件/外置卷/LaunchAgents 提示）；剩余：orphaned app data、system services（复杂孤儿检测，见 FUNCTION_MAP.md） |
 | 4 | purge 项目构建产物清理 | `bin/purge.sh`、`lib/clean/project.sh` | `src-tauri/src/purge/` + `src/pages/PurgePage.vue` | 项目清理页 | ✅ 扫描 + dry-run + Trash 执行 |
 | 5 | analyze 磁盘分析 | `cmd/analyze/*.go` | `src-tauri/src/analyze/` + `src/pages/AnalyzePage.vue` | 磁盘浏览页 | ✅ 全部完成（扫描+缓存+洞察+快照+Spotlight 大文件） |
 | 6 | uninstall 应用卸载 | `bin/uninstall.sh` + `lib/uninstall/*` | `src-tauri/src/uninstall/` + `src/pages/UninstallPage.vue` | 卸载页 | ✅ 6a–6d + brew/steam + bundle leaf + 系统级 LaunchAgents/Helpers/Receipts |
