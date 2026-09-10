@@ -204,10 +204,18 @@ mod tests {
         }
     }
 
+    /// 全局 store 为进程级单例——测试串行化，避免 clear()/put 互相踩踏。
+    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
     /// 写后可读；schema/TTL 由 put/get 封装保证。
     #[test]
     fn put_get_roundtrip() {
-        clear();
+        let _g = test_lock();
         let key = format!("/tmp/mole_cache_test_{}", std::process::id());
         put(&key, &sample_result(4096));
         let got = get(&key).expect("cache hit");
@@ -215,24 +223,22 @@ mod tests {
         // 相同大小临近过期 → put 跳过但仍可读。
         put(&key, &sample_result(4096));
         assert!(get(&key).is_some());
-        clear();
     }
 
     /// 空/零大小不入缓存。
     #[test]
     fn rejects_empty() {
-        clear();
+        let _g = test_lock();
         put("", &sample_result(4096));
-        put("/tmp/x", &sample_result(0));
+        put("/tmp/x_empty", &sample_result(0));
         assert!(get("").is_none());
-        assert!(get("/tmp/x").is_none());
-        clear();
+        assert!(get("/tmp/x_empty").is_none());
     }
 
     /// 淘汰：超 MAX_ENTRIES 后保留 KEEP_ENTRIES 条最新。
     #[test]
     fn eviction_keeps_recent() {
-        clear();
+        let _g = test_lock();
         for i in 0..(MAX_ENTRIES + 10) {
             let key = format!("/dir-{i:04}");
             put(&key, &sample_result(1024));
@@ -241,21 +247,20 @@ mod tests {
         let cache = guard.as_ref().unwrap();
         // put 会同步淘汰；条目数 ≤ MAX，且最新条目仍在。
         assert!(cache.entries.len() <= MAX_ENTRIES);
-        assert!(cache.entries.contains_key(&format!("/dir-{:04}", MAX_ENTRIES + 9)));
-        drop(guard);
-        clear();
+        assert!(cache
+            .entries
+            .contains_key(&format!("/dir-{:04}", MAX_ENTRIES + 9)));
     }
 
     /// 持久化：put 后磁盘上有 JSON 文件。
     #[test]
     fn persists_to_disk() {
-        clear();
+        let _g = test_lock();
         let key = format!("/tmp/mole_persist_{}", std::process::id());
         put(&key, &sample_result(8192));
         let path = store_path();
         assert!(path.is_file(), "store should exist at {:?}", path);
         let data = std::fs::read_to_string(&path).unwrap();
         assert!(data.contains(&key));
-        clear();
     }
 }

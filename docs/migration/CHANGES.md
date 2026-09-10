@@ -990,3 +990,29 @@
 ### 测试
 
 - 168 个测试通过（新增：cask token 提取矩阵、Steam 解析正反例、launcher fixture、dry-run 卸载）。
+
+---
+
+<a name="clean-deep-system"></a>
+## clean 深度清理（deep_system：系统级缓存/日志/崩溃报告）
+
+### 对标记录
+
+- `clean_deep_system` 主体四族 + adobegc.log 1:1：/Library/Caches（*.cache/*.tmp/*.log，≥7 天，maxdepth 5）、DiagnosticReports（*，≥7 天）、/private/var/log（*.log/*.gz/*.asl，≥7 天，maxdepth 3）、Adobe/CreativeCloud 日志、adobegc.log。
+- 永不删除：/Library/Updates、/macOS Install Data（Software Update 所有，AGENTS.md 明确禁止）。
+- sudo 门控：`sudo -n true`；无缓存 → 整族 Skipped（GUI 约束）。
+- 年龄门：mtime 早于 age_days 才入候选；保护/白名单在扫描期过滤。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| 删除 | safe_sudo_remove（/Library 暂存→Trash） | `sudo -n rm -rf` | **简化** | GUI 无特权 Trash 暂存基建；Trash 路由待后续 |
+| 预算 | 120s section budget | 每族 30s deadline | **简化** | GUI 非交互，单族预算足够 |
+| macOS 安装器 | 14 天+身份+运行中门控 | **未实现** | **暂缓** | 身份链复杂，独立子片 |
+| GPU 缓存 / 本地快照 | clean_local_snapshots 等 | **未实现** | **暂缓** | 需 tmutil 与 GPU 陈旧探测 |
+
+### 测试
+
+- 172 个测试通过（新增：never_delete 路径、find -name glob 语义、族扫描不 panic、无 sudo 真实执行返回失败详情；analyze cache 测试加锁防并行 clear 竞态）。
+- 真机冒烟：**405 组**；System logs 14.68 MB 可见（无 sudo 缓存时预览仍列出，执行将 Skipped）。

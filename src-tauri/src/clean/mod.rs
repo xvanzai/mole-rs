@@ -19,6 +19,7 @@ mod catalog;
 mod old_versions;
 mod owner_clean;
 mod probe;
+pub(crate) mod system;
 pub(crate) mod delete;
 pub(crate) mod process;
 pub(crate) mod protect;
@@ -1074,6 +1075,32 @@ pub fn scan_preview() -> CleanPreview {
         });
     }
 
+    // deep_system 族（对标 clean_deep_system；sudo -n 门控 + 年龄过滤）。
+    for family in system::system_families() {
+        let candidates = system::scan_family(&family);
+        let size = system::family_size(&candidates);
+        let sudo_ok = system::sudo_n_available();
+        let items: Vec<CleanItem> = candidates
+            .iter()
+            .map(|p| CleanItem {
+                path: p.to_string_lossy().to_string(),
+                size_bytes: 0,
+                skip_reason: if sudo_ok {
+                    String::new()
+                } else {
+                    "需要管理员权限".into()
+                },
+            })
+            .collect();
+        groups.push(CleanGroup {
+            description: family.label.to_string(),
+            family: "deep_system".to_string(),
+            items,
+            total_size_bytes: size,
+            skipped_count: if sudo_ok { 0 } else { candidates.len() },
+        });
+    }
+
     let total_size = groups.iter().map(|g| g.total_size_bytes).sum();
     CleanPreview {
         groups,
@@ -1167,6 +1194,32 @@ pub fn execute_clean(selected_groups: &[String], dry_run: bool) -> CleanExecuteR
             } else {
                 path
             },
+            status: status.into(),
+            size_bytes: 0,
+            detail,
+        });
+    }
+
+    // deep_system 族（对标 clean_deep_system）。
+    for family in system::system_families() {
+        if !selected_groups.iter().any(|s| s == family.label) {
+            continue;
+        }
+        let (ok, detail, removed) = system::execute_family(&family, dry_run);
+        let status = if dry_run {
+            "dry-run"
+        } else if ok {
+            "ok"
+        } else {
+            "failed"
+        };
+        if !dry_run && ok {
+            deleted_count += removed;
+        } else if status == "failed" {
+            failed_count += 1;
+        }
+        outcomes.push(DeleteOutcome {
+            path: family.root.to_string(),
             status: status.into(),
             size_bytes: 0,
             detail,
