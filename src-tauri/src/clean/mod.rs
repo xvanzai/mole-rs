@@ -19,6 +19,7 @@ mod catalog;
 mod old_versions;
 mod owner_clean;
 mod probe;
+pub(crate) mod brew;
 pub(crate) mod system;
 pub(crate) mod delete;
 pub(crate) mod process;
@@ -1362,12 +1363,157 @@ pub fn scan_preview() -> CleanPreview {
         });
     }
 
+    // Finder metadata (.DS_Store)（对标 clean_finder_metadata → clean_ds_store_tree）。
+    {
+        let ds_files = scan_ds_store_tree();
+        let size: u64 = ds_files
+            .iter()
+            .map(|p| path_size_with_deadline(p, global_deadline.min(Instant::now() + SIZE_SCAN_DEADLINE)))
+            .sum();
+        let items: Vec<CleanItem> = ds_files
+            .iter()
+            .map(|p| CleanItem {
+                path: p.to_string_lossy().to_string(),
+                size_bytes: 0,
+                skip_reason: String::new(),
+            })
+            .collect();
+        groups.push(CleanGroup {
+            description: "Finder metadata (.DS_Store)".into(),
+            family: "user_essentials".into(),
+            items,
+            total_size_bytes: size,
+            skipped_count: 0,
+        });
+    }
+
+    // Trash（对标 clean_trash）。
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let trash = PathBuf::from(&home).join(".Trash");
+        let (count, size) = if trash.is_dir() {
+            let entries: Vec<_> = std::fs::read_dir(&trash)
+                .map(|rd| rd.flatten().collect())
+                .unwrap_or_default();
+            let sz: u64 = entries
+                .iter()
+                .filter(|e| {
+                    !crate::clean::whitelist::Whitelist::load()
+                        .is_whitelisted(&e.path().to_string_lossy())
+                })
+                .map(|e| path_size_with_deadline(&e.path(), global_deadline))
+                .sum();
+            (entries.len(), sz)
+        } else {
+            (0, 0)
+        };
+        let items: Vec<CleanItem> = if count > 0 {
+            vec![CleanItem {
+                path: format!("{home}/.Trash"),
+                size_bytes: size,
+                skip_reason: String::new(),
+            }]
+        } else {
+            Vec::new()
+        };
+        groups.push(CleanGroup {
+            description: "Trash".into(),
+            family: "user_essentials".into(),
+            items,
+            total_size_bytes: size,
+            skipped_count: 0,
+        });
+    }
+
+    // Homebrew（对标 clean_homebrew）。
+    {
+        let result = brew::clean_homebrew(true);
+        let home = std::env::var("HOME").unwrap_or_default();
+        let cache = PathBuf::from(&home).join("Library/Caches/Homebrew");
+        let size = if cache.is_dir() {
+            path_size_with_deadline(&cache, global_deadline)
+        } else {
+            0
+        };
+        let items: Vec<CleanItem> = if result.status != "skipped" {
+            vec![CleanItem {
+                path: format!("{home}/Library/Caches/Homebrew"),
+                size_bytes: size,
+                skip_reason: if result.status == "ok" || result.status == "dry-run" {
+                    String::new()
+                } else {
+                    result.detail.clone()
+                },
+            }]
+        } else {
+            vec![CleanItem {
+                path: format!("{home}/Library/Caches/Homebrew"),
+                size_bytes: 0,
+                skip_reason: result.detail.clone(),
+            }]
+        };
+        groups.push(CleanGroup {
+            description: "Homebrew cleanup".into(),
+            family: "owner_command".into(),
+            items,
+            total_size_bytes: if result.status == "skipped" { 0 } else { size },
+            skipped_count: usize::from(result.status == "skipped"),
+        });
+    }
+
     let total_size = groups.iter().map(|g| g.total_size_bytes).sum();
     CleanPreview {
         groups,
         total_size_bytes: total_size,
         whitelist_source: whitelist.source_description().to_string(),
     }
+}
+
+/// 扫描家目录下 .DS_Store（对标 clean_ds_store_tree：maxdepth 5，排除
+/// MobileSync/Developer/.Trash/node_modules/.git/Library/Caches）。
+fn scan_ds_store_tree() -> Vec<PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let root = PathBuf::from(&home);
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut out = Vec::new();
+    let mut stack = vec![(root, 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        if Instant::now() >= deadline {
+            break;
+        }
+        // 排除目录（对标 find prune）。
+        let dir_str = dir.to_string_lossy();
+        if dir_str.contains("/Library/Application Support/MobileSync")
+            || dir_str.contains("/Library/Developer")
+            || dir_str.ends_with("/.Trash")
+            || dir_str.ends_with("/node_modules")
+            || dir_str.ends_with("/.git")
+            || dir_str.contains("/Library/Caches")
+        {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if Instant::now() >= deadline {
+                break;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_dir() && depth < 5 {
+                stack.push((entry.path(), depth + 1));
+            } else if name == ".DS_Store" && ft.is_file() {
+                out.push(entry.path());
+            }
+        }
+    }
+    out
 }
 
 /// 执行清理（对标 safe_clean 的真实删除分支 + mole_delete trash 模式）。
@@ -1516,6 +1662,113 @@ pub fn execute_clean(selected_groups: &[String], dry_run: bool) -> CleanExecuteR
         outcomes.push(DeleteOutcome {
             path: family.root.to_string(),
             status: status.into(),
+            size_bytes: 0,
+            detail,
+        });
+    }
+
+    // Finder metadata (.DS_Store)（对标 clean_finder_metadata）。
+    if selected_groups.iter().any(|s| s == "Finder metadata (.DS_Store)") {
+        let files = scan_ds_store_tree();
+        let mut removed = 0usize;
+        let mut failed = 0usize;
+        for f in &files {
+            let s = f.to_string_lossy().to_string();
+            if protect::should_protect_path(&s) || whitelist.is_whitelisted(&s) {
+                continue;
+            }
+            let outcome = delete::delete_to_trash(&s, dry_run, "clean");
+            match outcome.status.as_str() {
+                "ok" | "dry-run" => removed += 1,
+                "failed" => failed += 1,
+                _ => {}
+            }
+            freed_bytes += outcome.size_bytes;
+        }
+        if !dry_run {
+            deleted_count += removed;
+        }
+        if failed > 0 {
+            failed_count += 1;
+        }
+        outcomes.push(DeleteOutcome {
+            path: "Finder metadata (.DS_Store)".into(),
+            status: if dry_run {
+                "dry-run".into()
+            } else if failed > 0 {
+                "failed".into()
+            } else {
+                "ok".into()
+            },
+            size_bytes: 0,
+            detail: format!("已清理 {removed} 个 .DS_Store"),
+        });
+    }
+
+    // Trash（对标 clean_trash）。
+    if selected_groups.iter().any(|s| s == "Trash") {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let trash = PathBuf::from(&home).join(".Trash");
+        if trash.is_dir() && !whitelist.is_whitelisted(&trash.to_string_lossy()) {
+            let entries: Vec<_> = std::fs::read_dir(&trash)
+                .map(|rd| rd.flatten().collect())
+                .unwrap_or_default();
+            let mut removed = 0usize;
+            for e in &entries {
+                let s = e.path().to_string_lossy().to_string();
+                if protect::should_protect_path(&s) || whitelist.is_whitelisted(&s) {
+                    continue;
+                }
+                // Trash 内项目直接 rm（已在 Trash 中，不再 Trash 路由）。
+                if dry_run {
+                    removed += 1;
+                    continue;
+                }
+                let status = std::process::Command::new("/bin/rm")
+                    .arg("-rf")
+                    .arg(&s)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                match status {
+                    Ok(st) if st.success() => {
+                        removed += 1;
+                        freed_bytes += delete::delete_to_trash(&s, false, "clean").size_bytes;
+                    }
+                    _ => failed_count += 1,
+                }
+            }
+            if !dry_run {
+                deleted_count += removed;
+            }
+            outcomes.push(DeleteOutcome {
+                path: format!("{home}/.Trash"),
+                status: if dry_run { "dry-run" } else { "ok" }.into(),
+                size_bytes: 0,
+                detail: format!("已清空 {removed} 项"),
+            });
+        }
+    }
+
+    // Homebrew（对标 clean_homebrew）。
+    if selected_groups.iter().any(|s| s == "Homebrew cleanup") {
+        let result = brew::clean_homebrew(dry_run);
+        if result.status == "ok" && !dry_run {
+            deleted_count += 1;
+        } else if result.status == "failed" {
+            failed_count += 1;
+        }
+        let mut detail = result.detail.clone();
+        if !result.freed_hint.is_empty() {
+            detail.push_str(" · ");
+            detail.push_str(&result.freed_hint);
+        }
+        if !result.autoremove_preview.is_empty() {
+            detail.push_str(&format!(" · autoremove 预览 {} 项", result.autoremove_preview.len()));
+        }
+        outcomes.push(DeleteOutcome {
+            path: "Homebrew cleanup".into(),
+            status: result.status,
             size_bytes: 0,
             detail,
         });

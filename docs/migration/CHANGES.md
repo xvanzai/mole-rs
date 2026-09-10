@@ -1245,3 +1245,26 @@
 ### 测试
 
 - 198 个测试通过（新增：ProcessWatch 6 例、fold_dir、spotlight 不 panic）。
+
+---
+
+<a name="clean-brew-ds-trash"></a>
+## clean 深度清理：Homebrew + Finder metadata (.DS_Store) + Trash
+
+### 对标记录
+
+- `clean_homebrew` 1:1：brew 可用性 → 白名单 → 7 天窗口 → 缓存 <50MB 跳过 cleanup → `brew cleanup --prune=30` → `brew autoremove --dry-run` 预览（不执行 autoremove）。
+- `clean_finder_metadata` → `clean_ds_store_tree` 1:1：家目录 maxdepth 5，排除 MobileSync/Developer/.Trash/node_modules/.git/Library/Caches；.DS_Store 走 Trash。
+- `clean_trash` 1:1：~/.Trash 直接清空（不走 Trash 路由，避免递归）；dry-run 计数。
+
+### 变更前后对照
+
+| 项 | 原实现 | Rust 实现 | 是否变更 | 原因 |
+|----|--------|----------|---------|------|
+| brew 活跃链接快照/恢复 | snapshot/restore + sudo -u | **简化**：不恢复链接 | **简化** | GUI 无 root 调用场景；链接恢复依赖 sudo -u 注入 |
+| Trash 删除 | 直接 rm | /bin/rm -rf | 无行为变更 | 已在 Trash 中，不再 Trash 路由 |
+| autoremove | 预览后提示手动 | 相同（仅预览） | 无行为变更 | AGENTS.md：autoremove 需预览+手动确认 |
+
+### 测试
+
+- 200 个测试通过；真机冒烟：Finder metadata 39 项 0.45 MB、Homebrew 35.35 MB 可见。
