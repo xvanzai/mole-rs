@@ -867,3 +867,28 @@
 - 137 个测试通过（新增：全部 21 项 implemented、名称匹配矩阵、helper 后缀剥离）。
 - 真机 dry-run 冒烟（排除 login_items_audit——无 TCC 授权）：全部非 Failed。
 - **optimize 模块 21/21 处理器移植完成。**
+
+---
+
+<a name="clean-3f"></a>
+## clean 深度清理（子模块 3f 第六片：浏览器旧版本 + Group Containers）
+
+### 对标记录
+
+- `_clean_chromium_old_versions` 1:1：Chrome/Edge/Brave 三家；Current 符号链接目标保留；mtime 更新于 Current 的 staged auto-update 一并保留；其余版本目录进程守卫放行后走 Trash；Current 损坏整应用跳过。
+- `clean_edge_updater_old_versions` 1:1：有已安装 Edge 版本时保留 ≥ 安装版（pending update，#1216）；否则 sort -V 仅留最新；Edge 进程守卫。
+- Group Containers：`group.com.apple.contentdelivery` 的 Logs / Library/Logs 显式 allowlist。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| 版本比较 | sort -V 子进程 | 手动数字分段比较 version_cmp | 实现差异（语义一致） | 避免每目录 fork |
+| Current 读取 | readlink | std::fs::read_link | 无行为变更 | — |
+| 删除 | safe_remove / safe_sudo_remove | delete_to_trash | **加固** | 统一 Trash 可恢复 |
+| 进程守卫 | 逐目录重探针 | ScanEntry process_probe（扫描+sink 双重） | 无行为变更 | 三态仅 Idle 放行 |
+
+### 测试
+
+- 151 个测试通过（新增：version_cmp 矩阵、Versions fixture 候选收集、损坏 Current 跳过）。
+- 真机冒烟：**393 组**（原 221）；总量 666 MB。

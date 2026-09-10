@@ -107,6 +107,11 @@ pub fn brave_process_state() -> ProcessState {
     pgrep_any(&[("-x", "Brave Browser")])
 }
 
+/// Microsoft Edge（精确名，不得匹配 Teams）。
+pub fn microsoft_edge_process_state() -> ProcessState {
+    pgrep_any(&[("-x", "Microsoft Edge")])
+}
+
 /// Dia 浏览器。
 pub fn dia_process_state() -> ProcessState {
     pgrep_any(&[("-x", "Dia")])

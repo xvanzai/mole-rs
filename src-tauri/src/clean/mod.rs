@@ -16,6 +16,7 @@
 //! - 受保护/白名单路径在扫描期与删除 sink 双重拦截。
 
 mod catalog;
+mod old_versions;
 mod probe;
 pub(crate) mod delete;
 pub(crate) mod process;
@@ -246,16 +247,16 @@ fn skip_reason(
 }
 
 /// 统一扫描条目：静态目录行 + 动态探测行 + 进程守卫行。
-struct ScanEntry {
-    family: &'static str,
-    pattern: PathBuf,
-    description: String,
+pub(super) struct ScanEntry {
+    pub(super) family: &'static str,
+    pub(super) pattern: PathBuf,
+    pub(super) description: String,
     /// 进程守卫探针（对标 mole_clean_process_guard 三态）：
     /// Running/Unknown 时整组以 skip_reason 拒绝，不进入删除 sink。
-    process_probe: Option<fn() -> process::ProcessState>,
+    pub(super) process_probe: Option<fn() -> process::ProcessState>,
     /// Service Worker 域名保护：true 时从路径 basename 提取域名并对照
     /// PROTECTED_SW_DOMAINS（对标 clean_service_worker_cache 的 domain 检查）。
-    sw_domain_guard: bool,
+    pub(super) sw_domain_guard: bool,
 }
 
 /// PROTECTED_SW_DOMAINS（对标 bin/clean.sh）：Web 编辑器 / Google Workspace /
@@ -533,6 +534,27 @@ fn dynamic_entries() -> Vec<ScanEntry> {
 
     // Service Worker CacheStorage（对标 clean_service_worker_cache 的 profile 遍历）。
     rows.extend(service_worker_entries());
+
+    // Group Containers 显式 allowlist（对标 contentdelivery Logs）。
+    let gc = PathBuf::from(&home).join("Library/Group Containers/group.com.apple.contentdelivery");
+    if gc.is_dir() {
+        for sub in ["Logs", "Library/Logs"] {
+            let p = gc.join(sub);
+            if p.is_dir() {
+                rows.push(ScanEntry {
+                    family: "user_essentials",
+                    pattern: p,
+                    description: format!("Group Container contentdelivery {sub}"),
+                    process_probe: None,
+                    sw_domain_guard: false,
+                });
+            }
+        }
+    }
+
+    // Chromium 系旧版本 + EdgeUpdater staged payload（对标 clean_*_old_versions）。
+    rows.extend(old_versions::chromium_old_version_entries());
+    rows.extend(old_versions::edge_updater_old_version_entries());
 
     rows.extend(app_support_regenerable_entries());
     rows
@@ -965,9 +987,11 @@ fn collect_entries() -> Vec<ScanEntry> {
 }
 
 /// 只读扫描预览（对标 dry-run：`MOLE_DRY_RUN=1 ./mole clean`）。
+/// 全局预算 90s（对标 section budget）：超时后剩余条目 size=0 仍列出。
 pub fn scan_preview() -> CleanPreview {
     let whitelist = whitelist::Whitelist::load();
     let mut groups = Vec::new();
+    let global_deadline = Instant::now() + Duration::from_secs(90);
 
     for entry in collect_entries() {
         // 进程守卫：Running/Unknown 整组以 skip_reason 拒绝（对标
@@ -1003,7 +1027,7 @@ pub fn scan_preview() -> CleanPreview {
                 });
                 continue;
             }
-            let size = path_size_with_deadline(&target, Instant::now() + SIZE_SCAN_DEADLINE);
+            let size = path_size_with_deadline(&target, global_deadline.min(Instant::now() + SIZE_SCAN_DEADLINE));
             total += size;
             items.push(CleanItem {
                 path: target_str,
@@ -1250,7 +1274,17 @@ mod smoke_tests {
         assert!(!preview.groups.is_empty());
     }
 
-    /// dry-run 全链路：执行 dry-run，确认零删除且有 dry-run 记录。
+    /// 条目计数冒烟（快速，不测径）：确认目录规模与描述唯一性在真机成立。
+    #[test]
+    fn entry_count_smoke() {
+        let entries = super::collect_entries();
+        let mut seen = std::collections::HashSet::new();
+        for e in &entries {
+            assert!(seen.insert(e.description.clone()), "重复: {}", e.description);
+        }
+        println!("collect_entries={} unique_desc={}", entries.len(), seen.len());
+        assert!(entries.len() > 100, "目录应已覆盖主要清理族");
+    }
     #[test]
     #[ignore]
     fn clean_execute_dry_run_smoke() {
