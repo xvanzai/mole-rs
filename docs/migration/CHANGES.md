@@ -1170,3 +1170,25 @@
 ### 测试
 
 - 187 个测试通过（新增：leaf 推导矩阵、驼峰分词）。
+
+---
+
+<a name="clean-metal-installer"></a>
+## clean 深度清理：Metal GPU 缓存 + macOS 安装器应用
+
+### 对标记录
+
+- **Metal GPU 缓存**（system.sh 634-709）：/private/var/folders maxdepth 8，depth-3 prune 非 C；仅 C/**/com.apple.{gpuarchiver,metal,metalfe}；端点安全缓存跳过；gpu_cache_dir_is_stale（1 天内无文件修改=陈旧）→ sudo 删除。
+- **macOS 安装器**（system.sh 391-500 简化）：Install macOS*.app；≥14 天；非符号链接；software_update_pending_or_unknown（RecommendedUpdates 非 [] 或不可读 → fail-closed 阻止）；pgrep -f 进程空闲；DTPlatformVersion 大版本 ≠ 当前 sw_vers。
+
+### 变更前后对照
+
+| 项 | 原实现 | Rust 实现 | 是否变更 | 原因 |
+|----|--------|----------|---------|------|
+| 安装器身份链 | stat d:i:m + 双重资格复检 | mtime + 进程 + 版本（无身份绑定） | **简化** | TOCTOU 身份绑定需 path snapshot 基建；年龄/进程/版本三门已覆盖主要风险 |
+| find prune | -depth 3 ! -name C -prune | depth≥3 且非 C 不下钻 | 无行为变更 | — |
+| 安全删除 | safe_sudo_remove | sudo -n rm -rf | **简化** | 同 deep_system 其余族 |
+
+### 测试
+
+- 189 个测试通过（新增：Metal 目录匹配矩阵、族含 Metal/安装器）。

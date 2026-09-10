@@ -86,6 +86,25 @@ pub fn system_families() -> Vec<SystemFamily> {
             age_days: LOG_AGE_DAYS,
             max_depth: 1,
         },
+        // Metal GPU 缓存（对标 system.sh 634-709 的 accessible rebuildable GPU caches）。
+        SystemFamily {
+            id: "metal_gpu_caches",
+            label: "Metal GPU caches",
+            root: "/private/var/folders",
+            // 由 scan_metal_gpu_caches 特殊处理（C/ 容器 + 目录名匹配 + 陈旧）。
+            patterns: &["com.apple.gpuarchiver", "com.apple.metal", "com.apple.metalfe"],
+            age_days: 1, // MOLE_GPU_CACHE_AGE_DAYS
+            max_depth: 8,
+        },
+        // macOS 安装器应用（对标 clean_deep_system 的 installer 分支，简化身份链）。
+        SystemFamily {
+            id: "macos_installers",
+            label: "macOS installer apps",
+            root: "/Applications",
+            patterns: &["Install macOS*.app"],
+            age_days: 14,
+            max_depth: 1,
+        },
     ]
 }
 
@@ -134,7 +153,13 @@ fn is_never_delete(path: &str) -> bool {
 }
 
 /// 扫描族内过期候选（文件；depth ≤ max_depth；mtime 早于 age_days）。
+/// Metal GPU / macOS 安装器走各自特扫。
 pub fn scan_family(family: &SystemFamily) -> Vec<PathBuf> {
+    match family.id {
+        "metal_gpu_caches" => return scan_metal_gpu_caches(),
+        "macos_installers" => return scan_macos_installers(),
+        _ => {}
+    }
     let root = Path::new(family.root);
     if !root.is_dir() {
         return Vec::new();
@@ -197,6 +222,231 @@ pub fn scan_family(family: &SystemFamily) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// 对标 is_rebuildable_gpu_cache_dir：仅 /var/folders/**/C/**/ 下的
+/// com.apple.gpuarchiver|metal|metalfe。
+fn is_rebuildable_gpu_cache_dir(path: &str) -> bool {
+    let p = path.trim_start_matches("/private");
+    // 必须在 /var/folders/ 下且含 /C/ 段。
+    if !p.starts_with("/var/folders/") || !p.contains("/C/") {
+        return false;
+    }
+    let name = Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    matches!(
+        name.as_str(),
+        "com.apple.gpuarchiver" | "com.apple.metal" | "com.apple.metalfe"
+    )
+}
+
+/// 对标 gpu_cache_dir_is_stale：目录内无 age_days 内修改的文件 → 陈旧。
+fn gpu_cache_dir_is_stale(dir: &Path, age_days: u64) -> bool {
+    if !dir.is_dir() || dir.is_symlink() {
+        return false;
+    }
+    let cutoff = SystemTime::now()
+        .checked_sub(Duration::from_secs(age_days * 86400))
+        .unwrap_or(UNIX_EPOCH);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        if Instant::now() >= deadline {
+            return false; // 超时视为非陈旧（fail-closed）
+        }
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_dir() {
+                stack.push(entry.path());
+            } else if let Ok(meta) = entry.metadata() {
+                if let Ok(m) = meta.modified() {
+                    if m >= cutoff {
+                        return false; // 有近期文件 → 活跃
+                    }
+                }
+            }
+        }
+    }
+    true // 无近期文件 → 陈旧
+}
+
+/// 扫描陈旧 Metal GPU 缓存目录（对标 find /private/var/folders maxdepth 8）。
+fn scan_metal_gpu_caches() -> Vec<PathBuf> {
+    let root = Path::new("/private/var/folders");
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let whitelist = Whitelist::load();
+    let mut out = Vec::new();
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        if Instant::now() >= deadline {
+            break;
+        }
+        // -prune：depth 3 且非 C 的目录不再下钻（对标 find -depth 3 ! -name C -prune）。
+        if depth >= 3 {
+            let name = dir
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if name != "C" {
+                continue;
+            }
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if Instant::now() >= deadline {
+                break;
+            }
+            let path = entry.path();
+            let path_str = path.to_string_lossy().to_string();
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if !ft.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            // 目标名匹配 + 路径必须含 /C/。
+            if matches!(
+                name.as_str(),
+                "com.apple.gpuarchiver" | "com.apple.metal" | "com.apple.metalfe"
+            ) && path_str.contains("/C/")
+                && is_rebuildable_gpu_cache_dir(&path_str)
+            {
+                // 端点安全缓存跳过（对标 is_endpoint_security_cache_path）。
+                if protect::is_endpoint_security_cache_path(&path_str) {
+                    continue;
+                }
+                if protect::should_protect_path(&path_str) || whitelist.is_whitelisted(&path_str) {
+                    continue;
+                }
+                if gpu_cache_dir_is_stale(&path, 1) {
+                    out.push(path);
+                }
+                continue; // 不再下钻目标目录内部
+            }
+            if depth < 8 {
+                stack.push((path, depth + 1));
+            }
+        }
+    }
+    out
+}
+
+/// 对标 macos_installer_candidate_still_eligible 的简化：≥14 天、非符号链接、
+/// 软件更新未挂起、进程空闲、版本非当前。
+fn scan_macos_installers() -> Vec<PathBuf> {
+    let apps = Path::new("/Applications");
+    if !apps.is_dir() {
+        return Vec::new();
+    }
+    // 当前 macOS 大版本（sw_vers -productVersion → 第一段）。
+    let current_major = crate::status::run_cmd("sw_vers", &["-productVersion"], Duration::from_secs(3))
+        .ok()
+        .map(|v| v.trim().split('.').next().unwrap_or("").to_string())
+        .unwrap_or_default();
+
+    // 软件更新挂起检查（fail-closed）。
+    if software_update_pending_or_unknown() {
+        return Vec::new();
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let whitelist = Whitelist::load();
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(apps) else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        // Install macOS*.app
+        if !(name.starts_with("Install macOS") && name.ends_with(".app")) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() {
+            continue;
+        }
+        let path_str = path.to_string_lossy().to_string();
+        if protect::should_protect_path(&path_str) || whitelist.is_whitelisted(&path_str) {
+            continue;
+        }
+        // ≥14 天。
+        let Some(mt) = mtime_secs(&path) else {
+            continue;
+        };
+        if now.saturating_sub(mt) < 14 * 86400 {
+            continue;
+        }
+        // 进程空闲。
+        if installer_process_running(&path_str) {
+            continue;
+        }
+        // 版本非当前（DTPlatformVersion 大版本）。
+        if !current_major.is_empty() {
+            let installer_major = read_plat_version(&path)
+                .map(|v| v.split('.').next().unwrap_or("").to_string())
+                .unwrap_or_default();
+            if installer_major.is_empty() || installer_major == current_major {
+                continue;
+            }
+        }
+        out.push(path);
+    }
+    out
+}
+
+/// 对标 software_update_pending_or_unknown：RecommendedUpdates 非显式空数组
+/// 或不可读 → 视为挂起（fail-closed）。
+fn software_update_pending_or_unknown() -> bool {
+    let plist = "/Library/Preferences/com.apple.SoftwareUpdate.plist";
+    if !Path::new(plist).is_file() {
+        return true; // 无文件视为未知 → 阻止
+    }
+    // 用 plutil 提取 JSON。
+    let Ok(out) = crate::status::run_cmd(
+        "plutil",
+        &["-extract", "RecommendedUpdates", "json", "-o", "-", plist],
+        Duration::from_secs(3),
+    ) else {
+        return true; // 不可读 → fail-closed
+    };
+    // 只有显式 [] 才算无挂起。
+    out.trim() != "[]"
+}
+
+/// installer 进程是否在运行（对标 pgrep -f path）。
+fn installer_process_running(path: &str) -> bool {
+    crate::status::run_cmd("pgrep", &["-f", path], Duration::from_secs(3)).is_ok()
+}
+
+/// 读取 DTPlatformVersion（对标 PlistBuddy）。
+fn read_plat_version(app: &Path) -> Option<String> {
+    let plist = app.join("Contents/Info.plist");
+    let dict = plist::Value::from_file(plist).ok()?.into_dictionary()?;
+    dict.get("DTPlatformVersion")
+        .and_then(|v| v.as_string())
+        .map(|s| s.to_string())
 }
 
 /// 族大小合计。
@@ -320,5 +570,31 @@ mod tests {
             assert!(!ok);
             assert!(detail.contains("sudo") || detail.contains("管理员"));
         }
+    }
+
+    /// Metal GPU 缓存目录匹配。
+    #[test]
+    fn metal_gpu_dir_matching() {
+        assert!(is_rebuildable_gpu_cache_dir(
+            "/private/var/folders/ab/cd/ef/C/xyz/com.apple.metal"
+        ));
+        assert!(is_rebuildable_gpu_cache_dir(
+            "/var/folders/ab/cd/EF/C/xyz/com.apple.gpuarchiver"
+        ));
+        assert!(!is_rebuildable_gpu_cache_dir(
+            "/private/var/folders/ab/T/xyz/com.apple.metal"
+        )); // 非 C/
+        assert!(!is_rebuildable_gpu_cache_dir("/Library/Caches/com.apple.metal"));
+        assert!(!is_rebuildable_gpu_cache_dir(
+            "/private/var/folders/ab/C/xyz/com.apple.other"
+        ));
+    }
+
+    /// 族含 Metal 与安装器。
+    #[test]
+    fn families_include_metal_and_installers() {
+        let ids: Vec<&str> = system_families().iter().map(|f| f.id).collect();
+        assert!(ids.contains(&"metal_gpu_caches"));
+        assert!(ids.contains(&"macos_installers"));
     }
 }

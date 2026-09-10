@@ -188,7 +188,7 @@ pub fn should_protect_data(bundle_id: &str) -> bool {
 
 /// 对标 `is_endpoint_security_cache_path`：仅 /private/var/folders（含
 /// /var/folders 符号形式）范围内，nocasematch 包含厂商前缀即保护。
-fn is_endpoint_security_cache_path(path: &str) -> bool {
+pub(crate) fn is_endpoint_security_cache_path(path: &str) -> bool {
     let in_scope = path.starts_with("/private/var/folders/") || path.starts_with("/var/folders/");
     if !in_scope {
         return false;
