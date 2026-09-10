@@ -127,6 +127,26 @@ pub fn utm_process_state() -> ProcessState {
     pgrep_any(&[("-x", "UTM")])
 }
 
+/// Dropbox。
+pub fn dropbox_process_state() -> ProcessState {
+    pgrep_any(&[("-x", "Dropbox")])
+}
+
+/// Google Drive。
+pub fn google_drive_process_state() -> ProcessState {
+    pgrep_any(&[("-x", "Google Drive")])
+}
+
+/// OneDrive。
+pub fn onedrive_process_state() -> ProcessState {
+    pgrep_any(&[("-x", "OneDrive")])
+}
+
+/// Mail（对标 _clean_mail_downloads 的 pgrep -x Mail）。
+pub fn mail_process_state() -> ProcessState {
+    pgrep_any(&[("-x", "Mail")])
+}
+
 /// 对标 `mole_clean_process_guard` 的翻译：仅 Idle 放行。
 /// 返回 (是否放行, 拒绝原因)。
 pub fn guard_allows(state: ProcessState) -> Result<(), &'static str> {

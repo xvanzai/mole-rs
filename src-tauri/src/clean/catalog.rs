@@ -34,6 +34,9 @@ pub fn family_label(family: &str) -> &'static str {
         "apple_silicon" => "Apple Silicon 更新",
         "virtualization" => "虚拟化工具",
         "app_support" => "Application Support",
+        "cloud_office" => "云与 Office",
+        "user_essentials" => "用户基础",
+        "service_worker" => "Service Worker",
         _ => "其他",
     }
 }
@@ -213,13 +216,94 @@ pub fn virtualization_catalog() -> Vec<CatalogEntry> {
         .collect()
 }
 
-/// 全量目录（Apple 用户缓存 + 开发工具链 + 浏览器 + Apple Silicon + 虚拟化）。
+/// 云存储与 Office 静态缓存行（对标 clean_cloud_storage / clean_office_applications
+/// 中无进程守卫的行；Dropbox/GoogleDrive/OneDrive 守卫行见 mod.rs）。
+pub fn cloud_office_catalog() -> Vec<CatalogEntry> {
+    let rows: &[(&str, &str)] = &[
+        ("~/Library/Caches/com.baidu.netdisk", "Baidu Netdisk cache"),
+        (
+            "~/Library/Caches/com.alibaba.teambitiondisk",
+            "Alibaba Cloud cache",
+        ),
+        ("~/Library/Caches/com.box.desktop", "Box cache"),
+        ("~/Library/Caches/com.microsoft.Word", "Microsoft Word cache"),
+        (
+            "~/Library/Containers/com.microsoft.Word/Data/Library/Caches/*",
+            "Microsoft Word container cache",
+        ),
+        (
+            "~/Library/Containers/com.microsoft.Word/Data/tmp/*",
+            "Microsoft Word temp files",
+        ),
+        (
+            "~/Library/Containers/com.microsoft.Word/Data/Library/Logs/*",
+            "Microsoft Word container logs",
+        ),
+        ("~/Library/Caches/com.microsoft.Excel", "Microsoft Excel cache"),
+        (
+            "~/Library/Containers/com.microsoft.Excel/Data/Library/Caches/*",
+            "Microsoft Excel container cache",
+        ),
+        (
+            "~/Library/Containers/com.microsoft.Excel/Data/tmp/*",
+            "Microsoft Excel temp files",
+        ),
+        (
+            "~/Library/Containers/com.microsoft.Excel/Data/Library/Logs/*",
+            "Microsoft Excel container logs",
+        ),
+        (
+            "~/Library/Caches/com.microsoft.Powerpoint",
+            "Microsoft PowerPoint cache",
+        ),
+        (
+            "~/Library/Caches/com.microsoft.Outlook/*",
+            "Microsoft Outlook cache",
+        ),
+        ("~/Library/Caches/com.apple.iWork.*", "Apple iWork cache"),
+        (
+            "~/Library/Caches/com.kingsoft.wpsoffice.mac",
+            "WPS Office cache",
+        ),
+        (
+            "~/Library/Caches/org.mozilla.thunderbird/*",
+            "Thunderbird cache",
+        ),
+        ("~/Library/Caches/com.apple.mail/*", "Apple Mail cache"),
+    ];
+    rows.iter()
+        .map(|(path, description)| CatalogEntry {
+            family: "cloud_office",
+            path,
+            home_env: None,
+            description,
+        })
+        .collect()
+}
+
+/// 用户基础行（对标 clean_user_essentials 中的显式 safe_clean 行）。
+/// Trash 清空、Recent Items、Mail Downloads 见 mod.rs 动态行。
+pub fn user_essentials_catalog() -> Vec<CatalogEntry> {
+    let rows: &[(&str, &str)] = &[("~/Library/Logs/*", "User app logs")];
+    rows.iter()
+        .map(|(path, description)| CatalogEntry {
+            family: "user_essentials",
+            path,
+            home_env: None,
+            description,
+        })
+        .collect()
+}
+
+/// 全量目录。
 pub fn full_catalog() -> Vec<CatalogEntry> {
     let mut all = apple_user_cache_catalog();
     all.extend(dev_toolchain_catalog());
     all.extend(browser_catalog());
     all.extend(apple_silicon_catalog());
     all.extend(virtualization_catalog());
+    all.extend(cloud_office_catalog());
+    all.extend(user_essentials_catalog());
     all
 }
 

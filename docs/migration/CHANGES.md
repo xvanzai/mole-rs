@@ -257,6 +257,35 @@
 
 ---
 
+<a name="clean-3e"></a>
+## clean 深度清理（子模块 3e 第五片：Service Worker + Cloud&Office + 用户基础）
+
+### 对标记录
+
+- `clean_service_worker_cache` 核心 1:1：符号链接根拒绝 → depth≤2 展开 → basename 提取域名（对标 `grep -oE | head -1`）→ PROTECTED_SW_DOMAINS 子串保护 → whitelist 显式尊重（#724）→ Trash。
+- PROTECTED_SW_DOMAINS 18 项 1:1（Web 编辑器 / Google Workspace / 代码平台 / 协作工具）。
+- `clean_cloud_storage` 1:1：Dropbox/Google Drive/OneDrive 进程守卫；Baidu/Alibaba/Box 静态行。
+- `clean_office_applications` 1:1：Word/Excel 容器三层 + PowerPoint/Outlook/iWork/WPS/Thunderbird/Mail 静态行。
+- `clean_user_essentials` 显式行 1:1：用户日志、Recent Items（8 个 sfl/sfl2 + plist）、Mail Downloads（Mail 进程守卫）。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| SW 域名提取 | basename \| grep -oE \| head -1 | 手写首匹配扫描（TLD 仅 [a-zA-Z]{2,}） | 无行为变更 | 多级域在第二点截断（docs.google.com→docs.google），与 grep 一致 |
+| SW depth | find -depth 2 全量物化后逐条删 | origin + 一层子目录展开为独立 ScanEntry | **实现差异（语义一致）** | GUI 按条目预览/选择；Trash 删除等价 |
+| Mail Downloads 龄 | 30 天 mtime 过滤在删除循环 | 目录整展开，龄过滤暂缓 | **简化** | 预览完整性优先；龄过滤并入后续 owner 子片 |
+| incomplete downloads | lsof 开句柄三态 + 身份绑定 | **未实现** | **暂缓** | 需 lsof 探针与 sink 身份绑定基建 |
+| Dropbox glob | com.dropbox.* | 读目录前缀匹配 | 无行为变更 | — |
+| Group Containers | contentdelivery allowlist | **未实现** | **暂缓** | 1 个容器，后续小片 |
+
+### 测试
+
+- 147 个测试通过（新增：SW 域名提取矩阵——github.com 完整匹配、docs.google.com 截断、hash 无域名；保护子串；skip_reason 域名分支）。
+- 真机冒烟：**221 组**（原 121）；总量 660.74 MB（含 SW/云/Office 贡献）。
+
+---
+
 <a name="status-系统监控-gpu-bt"></a>
 ## status 系统监控（增量子片：GPU + 蓝牙）
 

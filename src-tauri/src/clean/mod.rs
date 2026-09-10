@@ -220,12 +220,27 @@ fn walk_size(dir: &Path, deadline: Instant, total: &mut u64) {
 
 /// 扫描期逐路径检查，对标 `_safe_clean_impl` 的检查顺序：
 /// should_protect_path → 白名单（E5RT 编译模型缓存含在保护层 4c 内）。
-fn skip_reason(path: &str, whitelist: &whitelist::Whitelist) -> Option<&'static str> {
+/// `sw_domain_guard` 为 true 时追加 Service Worker 域名保护检查。
+fn skip_reason(
+    path: &str,
+    whitelist: &whitelist::Whitelist,
+    sw_domain_guard: bool,
+) -> Option<&'static str> {
     if protect::should_protect_path(path) {
         return Some("protected");
     }
     if whitelist.is_whitelisted(path) {
         return Some("whitelist");
+    }
+    if sw_domain_guard {
+        // 对标 clean_service_worker_cache：basename 提取域名 → PROTECTED_SW_DOMAINS。
+        if let Some(name) = Path::new(path).file_name().and_then(|n| n.to_str()) {
+            if let Some(domain) = extract_domain_from_sw_folder(name) {
+                if is_protected_sw_domain(&domain) {
+                    return Some("protected domain");
+                }
+            }
+        }
     }
     None
 }
@@ -238,6 +253,67 @@ struct ScanEntry {
     /// 进程守卫探针（对标 mole_clean_process_guard 三态）：
     /// Running/Unknown 时整组以 skip_reason 拒绝，不进入删除 sink。
     process_probe: Option<fn() -> process::ProcessState>,
+    /// Service Worker 域名保护：true 时从路径 basename 提取域名并对照
+    /// PROTECTED_SW_DOMAINS（对标 clean_service_worker_cache 的 domain 检查）。
+    sw_domain_guard: bool,
+}
+
+/// PROTECTED_SW_DOMAINS（对标 bin/clean.sh）：Web 编辑器 / Google Workspace /
+/// 代码平台 / 协作工具的 Service Worker 缓存永不删除（MV3 扩展离线可用性）。
+const PROTECTED_SW_DOMAINS: &[&str] = &[
+    "capcut.com",
+    "photopea.com",
+    "pixlr.com",
+    "docs.google.com",
+    "sheets.google.com",
+    "slides.google.com",
+    "drive.google.com",
+    "mail.google.com",
+    "github.com",
+    "gitlab.com",
+    "codepen.io",
+    "codesandbox.io",
+    "replit.com",
+    "stackblitz.com",
+    "notion.so",
+    "figma.com",
+    "linear.app",
+    "excalidraw.com",
+];
+
+/// 从 CacheStorage 目录名提取 best-effort 域名（对标 basename | grep -oE | head -1）。
+fn extract_domain_from_sw_folder(folder_name: &str) -> Option<String> {
+    // [a-zA-Z0-9][-a-zA-Z0-9]*\.[a-zA-Z]{2,} — 取首个匹配（head -1）。
+    let bytes = folder_name.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_alphanumeric() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut j = i;
+        while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'-') {
+            j += 1;
+        }
+        if j > start && j < bytes.len() && bytes[j] == b'.' {
+            let tld_start = j + 1;
+            let mut k = tld_start;
+            while k < bytes.len() && bytes[k].is_ascii_alphabetic() {
+                k += 1;
+            }
+            if k - tld_start >= 2 && (start == 0 || !bytes[start - 1].is_ascii_alphanumeric()) {
+                return Some(folder_name[start..k].to_lowercase());
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// 域名是否命中 PROTECTED_SW_DOMAINS（对标 `*"$protected_domain"*` 子串）。
+fn is_protected_sw_domain(domain: &str) -> bool {
+    PROTECTED_SW_DOMAINS.iter().any(|p| domain.contains(p))
 }
 
 /// 动态探测行（对标 dev.sh 中经 owner 命令解析路径后 safe_clean 的行）。
@@ -266,6 +342,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
             pattern: npm_default.join(sub),
             description: desc.to_string(),
             process_probe: None,
+            sw_domain_guard: false,
         });
     }
     if npm_custom {
@@ -279,6 +356,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
                     pattern: npm_cache_path.join(sub),
                     description: format!("{desc} (custom path)"),
                     process_probe: None,
+                    sw_domain_guard: false,
                 });
             }
         }
@@ -291,6 +369,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
             pattern: probe::uv_default_cache_path().join("*"),
             description: "uv cache".into(),
             process_probe: None,
+            sw_domain_guard: false,
         });
     }
 
@@ -302,6 +381,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
                 pattern: corepack_path.join("*"),
                 description: "Corepack cache".into(),
                 process_probe: None,
+                sw_domain_guard: false,
             });
         }
     }
@@ -312,6 +392,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
         pattern: probe::mise_cache_path().join("*"),
         description: "mise cache".into(),
         process_probe: None,
+        sw_domain_guard: false,
     });
 
     // Cargo registry/cache（对标 clean_dev_rust）：owner 进程守卫 +
@@ -327,6 +408,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
             pattern: PathBuf::from(&home).join("Library/Caches/com.utmapp.UTM/*"),
             description: "UTM app cache".into(),
             process_probe: Some(process::utm_process_state),
+            sw_domain_guard: false,
         });
     }
     if Path::new(&home)
@@ -339,6 +421,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
                 .join("Library/Containers/com.utmapp.UTM/Data/Library/Caches/*"),
             description: "UTM sandbox cache".into(),
             process_probe: Some(process::utm_process_state),
+            sw_domain_guard: false,
         });
         rows.push(ScanEntry {
             family: "virtualization",
@@ -346,10 +429,205 @@ fn dynamic_entries() -> Vec<ScanEntry> {
                 .join("Library/Containers/com.utmapp.UTM/Data/tmp/*"),
             description: "UTM temporary files".into(),
             process_probe: Some(process::utm_process_state),
+            sw_domain_guard: false,
         });
     }
 
+    // 云存储进程守卫行（对标 clean_cloud_storage）。
+    {
+        let caches = PathBuf::from(&home).join("Library/Caches");
+        if let Ok(entries) = std::fs::read_dir(&caches) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with("com.dropbox.") || name == "com.getdropbox.dropbox" {
+                    rows.push(ScanEntry {
+                        family: "cloud_office",
+                        pattern: e.path(),
+                        description: format!("Dropbox cache · {name}"),
+                        process_probe: Some(process::dropbox_process_state),
+                        sw_domain_guard: false,
+                    });
+                }
+            }
+        }
+    }
+    if Path::new(&home)
+        .join("Library/Caches/com.google.GoogleDrive")
+        .is_dir()
+    {
+        rows.push(ScanEntry {
+            family: "cloud_office",
+            pattern: PathBuf::from(&home).join("Library/Caches/com.google.GoogleDrive"),
+            description: "Google Drive cache".into(),
+            process_probe: Some(process::google_drive_process_state),
+            sw_domain_guard: false,
+        });
+    }
+    if Path::new(&home)
+        .join("Library/Caches/com.microsoft.OneDrive")
+        .is_dir()
+    {
+        rows.push(ScanEntry {
+            family: "cloud_office",
+            pattern: PathBuf::from(&home).join("Library/Caches/com.microsoft.OneDrive"),
+            description: "OneDrive cache".into(),
+            process_probe: Some(process::onedrive_process_state),
+            sw_domain_guard: false,
+        });
+    }
+
+    // Recent Items（对标 _clean_recent_items）。
+    let shared = PathBuf::from(&home).join("Library/Application Support/com.apple.sharedfilelist");
+    if shared.is_dir() {
+        for name in [
+            "com.apple.LSSharedFileList.RecentApplications.sfl2",
+            "com.apple.LSSharedFileList.RecentDocuments.sfl2",
+            "com.apple.LSSharedFileList.RecentServers.sfl2",
+            "com.apple.LSSharedFileList.RecentHosts.sfl2",
+            "com.apple.LSSharedFileList.RecentApplications.sfl",
+            "com.apple.LSSharedFileList.RecentDocuments.sfl",
+            "com.apple.LSSharedFileList.RecentServers.sfl",
+            "com.apple.LSSharedFileList.RecentHosts.sfl",
+        ] {
+            let p = shared.join(name);
+            if p.exists() {
+                rows.push(ScanEntry {
+                    family: "user_essentials",
+                    pattern: p,
+                    description: format!("Recent items list · {name}"),
+                    process_probe: None,
+                    sw_domain_guard: false,
+                });
+            }
+        }
+    }
+    let recent_plist =
+        PathBuf::from(&home).join("Library/Preferences/com.apple.recentitems.plist");
+    if recent_plist.exists() {
+        rows.push(ScanEntry {
+            family: "user_essentials",
+            pattern: recent_plist,
+            description: "Recent items preferences".into(),
+            process_probe: None,
+            sw_domain_guard: false,
+        });
+    }
+
+    // Mail Downloads（对标 _clean_mail_downloads；Mail 运行中跳过；30 天阈值在
+    // 执行期由 mtime 过滤——此处展开整个目录，扫描期不按龄过滤以保持 GUI 预览
+    // 完整性；对标差异记 CHANGES.md）。
+    for mail_dir in [
+        format!("{home}/Library/Mail Downloads"),
+        format!("{home}/Library/Containers/com.apple.mail/Data/Library/Mail Downloads"),
+    ] {
+        if Path::new(&mail_dir).is_dir() {
+            rows.push(ScanEntry {
+                family: "user_essentials",
+                pattern: PathBuf::from(&mail_dir).join("*"),
+                description: format!("Mail downloads · {}", Path::new(&mail_dir).file_name().unwrap_or_default().to_string_lossy()),
+                process_probe: Some(process::mail_process_state),
+                sw_domain_guard: false,
+            });
+        }
+    }
+
+    // Service Worker CacheStorage（对标 clean_service_worker_cache 的 profile 遍历）。
+    rows.extend(service_worker_entries());
+
     rows.extend(app_support_regenerable_entries());
+    rows
+}
+
+/// 对标 clean_service_worker_cache 的 profile 遍历：Chrome/Arc/Brave/Dia/
+/// Vivaldi/QQBrowser3 的 Service Worker/CacheStorage 目录，depth≤2 展开为
+/// 单独条目并挂 sw_domain_guard。
+fn service_worker_entries() -> Vec<ScanEntry> {
+    let mut rows = Vec::new();
+    let mut seen_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let support = PathBuf::from(&home).join("Library/Application Support");
+    // 对标 clean_browsers 的 profile 遍历：各浏览器只列其实际 profile 根，
+    // 子目录（Chrome Default 等）由 read_dir 展开；Arc 的 User Data 已在
+    // Arc/*/ 中被覆盖，不重复显式加入。
+    let profiles: &[(&str, &str)] = &[
+        ("Google/Chrome", "Chrome"),
+        ("Arc", "Arc"),
+        ("BraveSoftware/Brave-Browser", "Brave"),
+        ("Dia/User Data", "Dia"),
+        ("Vivaldi", "Vivaldi"),
+        ("QQBrowser3", "QQBrowser3"),
+    ];
+    for (profile_rel, browser) in profiles {
+        let profile = support.join(profile_rel);
+        if !profile.is_dir() {
+            continue;
+        }
+        // profile 根 + 一层子目录（Chrome Default/Profile N 等）。
+        // Arc 额外展开 User Data/*/（对标第二个 for 循环）。
+        let mut roots = vec![profile.clone()];
+        if let Ok(entries) = std::fs::read_dir(&profile) {
+            for e in entries.flatten() {
+                if e.path().is_dir() {
+                    roots.push(e.path());
+                    // Arc: User Data/<profile> 二级展开。
+                    if *browser == "Arc" && e.file_name().to_string_lossy() == "User Data" {
+                        if let Ok(inner) = std::fs::read_dir(e.path()) {
+                            for i in inner.flatten() {
+                                if i.path().is_dir() {
+                                    roots.push(i.path());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for root in roots {
+            let sw = root.join("Service Worker/CacheStorage");
+            if !sw.is_dir() || !seen_paths.insert(sw.clone()) {
+                continue;
+            }
+            // 符号链接根拒绝（对标 physical != lexical）。
+            if sw.symlink_metadata().map(|m| m.is_symlink()).unwrap_or(false) {
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(&sw) else {
+                continue;
+            };
+            for origin in entries.flatten() {
+                if !origin.path().is_dir() {
+                    continue;
+                }
+                rows.push(ScanEntry {
+                    family: "service_worker",
+                    pattern: origin.path(),
+                    description: format!(
+                        "{browser} Service Worker · {}",
+                        origin.file_name().to_string_lossy()
+                    ),
+                    process_probe: None,
+                    sw_domain_guard: true,
+                });
+                if let Ok(subs) = std::fs::read_dir(origin.path()) {
+                    for sub in subs.flatten() {
+                        if sub.path().is_dir() {
+                            rows.push(ScanEntry {
+                                family: "service_worker",
+                                pattern: sub.path(),
+                                description: format!(
+                                    "{browser} Service Worker · {}/{}",
+                                    origin.file_name().to_string_lossy(),
+                                    sub.file_name().to_string_lossy()
+                                ),
+                                process_probe: None,
+                                sw_domain_guard: true,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
     rows
 }
 
@@ -443,6 +721,7 @@ fn app_support_regenerable_entries() -> Vec<ScanEntry> {
                 pattern: candidate,
                 description: format!("{app_name} · {sub}"),
                 process_probe: None,
+                sw_domain_guard: false,
             });
         }
     }
@@ -473,6 +752,7 @@ fn cargo_registry_entry() -> Option<ScanEntry> {
         pattern: cache_root.join("*"),
         description: "Rust cargo cache".into(),
         process_probe: Some(process::rust_build_process_state),
+        sw_domain_guard: false,
     })
 }
 
@@ -506,6 +786,7 @@ fn guarded_browser_entries() -> Vec<ScanEntry> {
                 pattern: PathBuf::from(&chrome).join(sub),
                 description: desc.to_string(),
                 process_probe: Some(process::google_chrome_process_state),
+                sw_domain_guard: false,
             });
         }
     }
@@ -517,6 +798,7 @@ fn guarded_browser_entries() -> Vec<ScanEntry> {
             pattern: PathBuf::from(&home).join("Library/Caches/Firefox/*"),
             description: "Firefox cache".into(),
             process_probe: Some(process::firefox_process_state),
+            sw_domain_guard: false,
         });
         rows.push(ScanEntry {
             family: "browser",
@@ -524,6 +806,7 @@ fn guarded_browser_entries() -> Vec<ScanEntry> {
                 .join("Library/Application Support/Firefox/Profiles/*/cache2/*"),
             description: "Firefox profile cache".into(),
             process_probe: Some(process::firefox_process_state),
+            sw_domain_guard: false,
         });
     }
 
@@ -558,6 +841,7 @@ fn guarded_browser_entries() -> Vec<ScanEntry> {
                 pattern: arc.join(sub),
                 description: desc.to_string(),
                 process_probe: Some(process::arc_process_state),
+                sw_domain_guard: false,
             });
         }
     }
@@ -584,6 +868,7 @@ fn guarded_browser_entries() -> Vec<ScanEntry> {
                 pattern: brave.join(sub),
                 description: desc.to_string(),
                 process_probe: Some(process::brave_process_state),
+                sw_domain_guard: false,
             });
         }
     }
@@ -606,6 +891,7 @@ fn guarded_browser_entries() -> Vec<ScanEntry> {
                 pattern: dia.join(sub),
                 description: desc.to_string(),
                 process_probe: Some(process::dia_process_state),
+                sw_domain_guard: false,
             });
         }
     }
@@ -630,6 +916,7 @@ fn guarded_browser_entries() -> Vec<ScanEntry> {
                 pattern: vivaldi.join(sub),
                 description: desc.to_string(),
                 process_probe: Some(process::vivaldi_process_state),
+                sw_domain_guard: false,
             });
         }
     }
@@ -652,6 +939,7 @@ fn guarded_browser_entries() -> Vec<ScanEntry> {
                 pattern: qq.join(sub),
                 description: desc.to_string(),
                 process_probe: Some(process::qqbrowser3_process_state),
+                sw_domain_guard: false,
             });
         }
     }
@@ -668,6 +956,7 @@ fn collect_entries() -> Vec<ScanEntry> {
             pattern: resolve_entry_path(&entry),
             description: entry.description.to_string(),
             process_probe: None,
+            sw_domain_guard: false,
         })
         .collect();
     entries.extend(dynamic_entries());
@@ -705,7 +994,7 @@ pub fn scan_preview() -> CleanPreview {
             }
             // 保护检查在扫描期同样执行：受保护/白名单路径永远不会出现在
             // 可清理列表（对标 _safe_clean_impl 的逐路径检查顺序）。
-            if let Some(reason) = skip_reason(&target_str, &whitelist) {
+            if let Some(reason) = skip_reason(&target_str, &whitelist, entry.sw_domain_guard) {
                 skipped += 1;
                 items.push(CleanItem {
                     path: target_str,
@@ -778,7 +1067,7 @@ pub fn execute_clean(selected_groups: &[String], dry_run: bool) -> CleanExecuteR
         for target in expand_glob(&entry.pattern) {
             let target_str = target.to_string_lossy().to_string();
             // Sink 复检：扫描与执行之间状态可能变化（对标 sink re-verify）。
-            if let Some(reason) = skip_reason(&target_str, &whitelist) {
+            if let Some(reason) = skip_reason(&target_str, &whitelist, entry.sw_domain_guard) {
                 outcomes.push(DeleteOutcome {
                     path: target_str,
                     status: "skipped".into(),
@@ -907,6 +1196,33 @@ mod tests {
             assert!(entry.process_probe.is_some());
             assert_eq!(entry.family, "dev_rust");
         }
+    }
+
+    /// Service Worker 域名提取与保护列表。
+    #[test]
+    fn sw_domain_extraction_and_protection() {
+        // 对标 basename | grep -oE | head -1：TLD 仅 [a-zA-Z]{2,}，
+        // 多级域会在第二个点处截断（docs.google.com → docs.google）。
+        assert_eq!(
+            extract_domain_from_sw_folder("https_github.com_0"),
+            Some("github.com".into())
+        );
+        assert_eq!(
+            extract_domain_from_sw_folder("https_docs.google.com_443"),
+            Some("docs.google".into())
+        );
+        assert_eq!(extract_domain_from_sw_folder("0a1b2c3d"), None);
+        // 子串匹配（对标 == *"$protected_domain"*）。
+        assert!(is_protected_sw_domain("github.com"));
+        assert!(is_protected_sw_domain("sub.figma.com"));
+        assert!(!is_protected_sw_domain("example.com"));
+        // skip_reason 域名分支。
+        let wl = whitelist::Whitelist::load();
+        assert_eq!(
+            skip_reason("/tmp/https_github.com_0", &wl, true),
+            Some("protected domain")
+        );
+        assert_eq!(skip_reason("/tmp/https_example.com_0", &wl, true), None);
     }
 }
 
