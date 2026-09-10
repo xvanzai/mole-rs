@@ -1102,3 +1102,28 @@
 ### 测试
 
 - 185 个测试通过（新增：年龄过滤语义、Deno root 安全拒绝）。
+
+---
+
+<a name="clean-dev-database-api"></a>
+## clean 深度清理：数据库/API/JetBrains/Composer 静态族
+
+### 对标记录
+
+- `clean_dev_database` 1:1：Sequel Ace/Pro、Redis Desktop Manager、Navicat、DBeaver、RedisInsight。
+- `clean_dev_api_tools` 1:1：Postman、Insomnia、TablePlus、Paw、Charles、Proxyman。
+- `clean_dev_jetbrains_logs` 1:1：~/Library/Logs/JetBrains/*。
+- `clean_dev_other_langs` Composer 行：legacy ~/.composer/cache + ~/Library/Caches/composer。
+
+### 变更前后对照
+
+| 项 | 原实现 | Rust 实现 | 是否变更 | 原因 |
+|----|--------|----------|---------|------|
+| NuGet/Dart Pub | 注释排除 | 不入目录 | 一致 | 混合状态存储，AGENTS.md 排除 |
+| Gradle 进程守卫 | gradle_daemon_running 三态 | **暂缓** | 需 Gradle 进程探针独立子片 |
+| Xcode 文档索引/simctl | keep-newest + unavailable UDID | **暂缓** | 身份/工具链探测复杂 |
+| Android NDK/SDK | check_android_ndk | **暂缓** | 独立子片 |
+
+### 测试
+
+- 185 个测试通过；真机冒烟 **424 组**（原 409）。

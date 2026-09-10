@@ -30,6 +30,10 @@ pub fn family_label(family: &str) -> &'static str {
         "dev_perl" => "Perl 工具链",
         "dev_cloud" => "云 CLI 与容器",
         "dev_ci" => "CI 与 DevOps",
+        "dev_database" => "数据库工具",
+        "dev_api" => "API 与调试",
+        "dev_jetbrains" => "JetBrains",
+        "dev_php" => "PHP 工具链",
         "browser" => "浏览器缓存",
         "browser_old_versions" => "浏览器旧版本",
         "apple_silicon" => "Apple Silicon 更新",
@@ -533,7 +537,42 @@ pub fn full_catalog() -> Vec<CatalogEntry> {
     all.extend(cloud_office_catalog());
     all.extend(user_essentials_catalog());
     all.extend(app_cache_catalog());
+    all.extend(dev_database_api_catalog());
     all
+}
+
+/// 数据库/API/JetBrains/Composer 等静态缓存行（对标 clean_dev_database /
+/// clean_dev_api_tools / clean_dev_jetbrains_logs / clean_dev_other_langs）。
+pub fn dev_database_api_catalog() -> Vec<CatalogEntry> {
+    let rows: &[(&str, &str, &str)] = &[
+        // Database tools（clean_dev_database）。
+        ("dev_database", "~/Library/Caches/com.sequel-ace.sequel-ace/*", "Sequel Ace cache"),
+        ("dev_database", "~/Library/Caches/com.eggerapps.Sequel-Pro/*", "Sequel Pro cache"),
+        ("dev_database", "~/Library/Caches/redis-desktop-manager/*", "Redis Desktop Manager cache"),
+        ("dev_database", "~/Library/Caches/com.navicat.*", "Navicat cache"),
+        ("dev_database", "~/Library/Caches/com.dbeaver.*", "DBeaver cache"),
+        ("dev_database", "~/Library/Caches/com.redis.RedisInsight", "Redis Insight cache"),
+        // API/debug tools（clean_dev_api_tools）。
+        ("dev_api", "~/Library/Caches/com.postmanlabs.mac/*", "Postman cache"),
+        ("dev_api", "~/Library/Caches/com.konghq.insomnia/*", "Insomnia cache"),
+        ("dev_api", "~/Library/Caches/com.tinyapp.TablePlus/*", "TablePlus cache"),
+        ("dev_api", "~/Library/Caches/com.getpaw.Paw/*", "Paw API cache"),
+        ("dev_api", "~/Library/Caches/com.charlesproxy.charles/*", "Charles Proxy cache"),
+        ("dev_api", "~/Library/Caches/com.proxyman.NSProxy/*", "Proxyman cache"),
+        // JetBrains logs（clean_dev_jetbrains_logs）。
+        ("dev_jetbrains", "~/Library/Logs/JetBrains/*", "JetBrains IDE logs"),
+        // PHP Composer（clean_dev_other_langs）。
+        ("dev_php", "~/.composer/cache/*", "PHP Composer cache (legacy)"),
+        ("dev_php", "~/Library/Caches/composer/*", "PHP Composer cache"),
+    ];
+    rows.iter()
+        .map(|(family, path, description)| CatalogEntry {
+            family,
+            path,
+            home_env: None,
+            description,
+        })
+        .collect()
 }
 
 /// 开发工具链族，对标 dev.sh 的普通 `safe_clean` 行。
