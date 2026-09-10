@@ -320,6 +320,132 @@ fn dynamic_entries() -> Vec<ScanEntry> {
         rows.push(entry);
     }
 
+    // UTM（对标 clean_utm_caches）：运行中整组跳过。
+    if Path::new(&home).join("Library/Caches/com.utmapp.UTM").is_dir() {
+        rows.push(ScanEntry {
+            family: "virtualization",
+            pattern: PathBuf::from(&home).join("Library/Caches/com.utmapp.UTM/*"),
+            description: "UTM app cache".into(),
+            process_probe: Some(process::utm_process_state),
+        });
+    }
+    if Path::new(&home)
+        .join("Library/Containers/com.utmapp.UTM")
+        .is_dir()
+    {
+        rows.push(ScanEntry {
+            family: "virtualization",
+            pattern: PathBuf::from(&home)
+                .join("Library/Containers/com.utmapp.UTM/Data/Library/Caches/*"),
+            description: "UTM sandbox cache".into(),
+            process_probe: Some(process::utm_process_state),
+        });
+        rows.push(ScanEntry {
+            family: "virtualization",
+            pattern: PathBuf::from(&home)
+                .join("Library/Containers/com.utmapp.UTM/Data/tmp/*"),
+            description: "UTM temporary files".into(),
+            process_probe: Some(process::utm_process_state),
+        });
+    }
+
+    rows.extend(app_support_regenerable_entries());
+    rows
+}
+
+/// 对标 `is_apple_silicon`（IS_M_SERIES）：仅 arm64 主机启用 Apple Silicon 行。
+fn is_apple_silicon() -> bool {
+    cfg!(target_arch = "aarch64")
+}
+
+/// 过滤 full_catalog：非 arm64 主机剔除 apple_silicon 族。
+fn filter_catalog_by_arch(entries: Vec<catalog::CatalogEntry>) -> Vec<catalog::CatalogEntry> {
+    if is_apple_silicon() {
+        return entries;
+    }
+    entries
+        .into_iter()
+        .filter(|e| e.family != "apple_silicon")
+        .collect()
+}
+
+/// 对标 `clean_application_support_logs` 的可再生缓存子树扫描。
+///
+/// Application Support 可能含许可证/数据库/离线资源/会话状态，本通用扫描
+/// 仅触碰显式可再生缓存子树（Code Cache / GPUCache / …）；有缓存标记的
+/// 应用追加 Cache/CachedData。应用级保护：whitelist → should_protect_path
+/// → should_protect_data → is_critical_system_component。
+fn app_support_regenerable_entries() -> Vec<ScanEntry> {
+    let mut rows = Vec::new();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let support = PathBuf::from(&home).join("Library/Application Support");
+    let Ok(apps) = std::fs::read_dir(&support) else {
+        return rows;
+    };
+
+    const CANDIDATES: &[&str] = &[
+        "Code Cache",
+        "GPUCache",
+        "DawnCache",
+        "GrShaderCache",
+        "GraphiteDawnCache",
+        "DawnGraphiteCache",
+        "DawnWebGPUCache",
+        "Crashpad/completed",
+    ];
+    const MARKERS: &[&str] = &[
+        "Code Cache",
+        "GPUCache",
+        "DawnCache",
+        "GrShaderCache",
+        "GraphiteDawnCache",
+        "DawnGraphiteCache",
+        "DawnWebGPUCache",
+        "Crashpad",
+    ];
+
+    for entry in apps.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        if !ft.is_dir() {
+            continue;
+        }
+        let app_dir = entry.path();
+        let app_name = entry.file_name().to_string_lossy().to_string();
+        // 应用级保护（对标循环内四层检查）。
+        let app_str = app_dir.to_string_lossy().to_string();
+        if protect::should_protect_path(&app_str)
+            || protect::should_protect_data(&app_name)
+            || protect::should_protect_data(&app_name.to_lowercase())
+            || protect::is_critical_system_component(&app_name)
+        {
+            continue;
+        }
+
+        // 可再生缓存标记。
+        let has_markers = MARKERS.iter().any(|m| app_dir.join(m).exists());
+        let mut subs: Vec<&str> = CANDIDATES.to_vec();
+        if has_markers {
+            subs.push("Cache");
+            subs.push("CachedData");
+        }
+
+        for sub in subs {
+            let candidate = app_dir.join(sub);
+            if !candidate.is_dir() {
+                continue;
+            }
+            let cand_str = candidate.to_string_lossy().to_string();
+            if protect::should_protect_path(&cand_str) {
+                continue;
+            }
+            rows.push(ScanEntry {
+                family: "app_support",
+                pattern: candidate,
+                description: format!("{app_name} · {sub}"),
+                process_probe: None,
+            });
+        }
+    }
     rows
 }
 
@@ -535,7 +661,7 @@ fn guarded_browser_entries() -> Vec<ScanEntry> {
 
 /// 汇总静态目录、动态探测行与进程守卫行。
 fn collect_entries() -> Vec<ScanEntry> {
-    let mut entries: Vec<ScanEntry> = catalog::full_catalog()
+    let mut entries: Vec<ScanEntry> = filter_catalog_by_arch(catalog::full_catalog())
         .into_iter()
         .map(|entry| ScanEntry {
             family: entry.family,

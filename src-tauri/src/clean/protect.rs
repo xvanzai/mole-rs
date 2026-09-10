@@ -48,6 +48,28 @@ pub fn bundle_matches_pattern(value: &str, pattern: &str) -> bool {
     glob_match(pattern, value)
 }
 
+/// 对标 `is_critical_system_component`：关键系统组件关键词（大小写不敏感
+/// 子串匹配）。
+pub fn is_critical_system_component(token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    let lower = token.to_lowercase();
+    const KEYWORDS: &[&str] = &[
+        "backgroundtaskmanagement",
+        "loginitems",
+        "systempreferences",
+        "systemsettings",
+        "settings",
+        "preferences",
+        "controlcenter",
+        "biometrickit",
+        "sfl",
+        "tcc",
+    ];
+    KEYWORDS.iter().any(|k| lower.contains(k))
+}
+
 /// 对标 `should_protect_data`：判断 bundle ID / 文件名是否含敏感数据。
 pub fn should_protect_data(bundle_id: &str) -> bool {
     let lower = bundle_id.to_lowercase();
@@ -674,6 +696,18 @@ mod tests {
         assert!(should_protect_data("app.standalone.Surge"));
         assert!(!should_protect_data("com.example.unknownapp"));
         assert!(!should_protect_data(""));
+    }
+
+    /// 对标 is_critical_system_component：关键系统组件关键词子串匹配。
+    #[test]
+    fn critical_system_component_keywords() {
+        assert!(is_critical_system_component("com.apple.SystemSettings"));
+        assert!(is_critical_system_component("BackgroundTaskManagement"));
+        assert!(is_critical_system_component("tccd"));
+        assert!(is_critical_system_component("Preferences"));
+        assert!(!is_critical_system_component("Safari"));
+        assert!(!is_critical_system_component(""));
+        assert!(!is_critical_system_component("Notes"));
     }
 
     /// 对标 step 7：文件名级保护。

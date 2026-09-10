@@ -31,6 +31,9 @@ pub fn family_label(family: &str) -> &'static str {
         "dev_cloud" => "云 CLI 与容器",
         "dev_ci" => "CI 与 DevOps",
         "browser" => "浏览器缓存",
+        "apple_silicon" => "Apple Silicon 更新",
+        "virtualization" => "虚拟化工具",
+        "app_support" => "Application Support",
         _ => "其他",
     }
 }
@@ -160,11 +163,63 @@ pub fn browser_catalog() -> Vec<CatalogEntry> {
         .collect()
 }
 
-/// 全量目录（Apple 用户缓存 + 开发工具链 + 浏览器族）。
+/// Apple Silicon 缓存（对标 clean_apple_silicon_caches）：仅 arm64 主机
+/// 在运行时挂载（见 mod.rs 的 is_apple_silicon）。
+pub fn apple_silicon_catalog() -> Vec<CatalogEntry> {
+    let rows: &[(&str, &str)] = &[
+        (
+            "/Library/Apple/usr/share/rosetta/rosetta_update_bundle",
+            "Rosetta 2 cache",
+        ),
+        (
+            "~/Library/Caches/com.apple.rosetta.update",
+            "Rosetta 2 user cache",
+        ),
+        (
+            "~/Library/Caches/com.apple.amp.mediasevicesd",
+            "Apple Silicon media service cache",
+        ),
+    ];
+    rows.iter()
+        .map(|(path, description)| CatalogEntry {
+            family: "apple_silicon",
+            path,
+            home_env: None,
+            description,
+        })
+        .collect()
+}
+
+/// 虚拟化工具静态缓存行（对标 clean_virtualization_tools 中无守卫的行）。
+/// UTM 有进程守卫、Tart 走 owner prune——见 mod.rs。
+pub fn virtualization_catalog() -> Vec<CatalogEntry> {
+    let rows: &[(&str, &str)] = &[
+        ("~/Library/Caches/com.vmware.fusion", "VMware Fusion cache"),
+        ("~/Library/Caches/com.parallels.*", "Parallels cache"),
+        ("~/VirtualBox VMs/.cache", "VirtualBox cache"),
+        (
+            "~/Library/Caches/lima/download/by-url-sha256/*",
+            "Lima download cache",
+        ),
+        ("~/.vagrant.d/tmp/*", "Vagrant temporary files"),
+    ];
+    rows.iter()
+        .map(|(path, description)| CatalogEntry {
+            family: "virtualization",
+            path,
+            home_env: None,
+            description,
+        })
+        .collect()
+}
+
+/// 全量目录（Apple 用户缓存 + 开发工具链 + 浏览器 + Apple Silicon + 虚拟化）。
 pub fn full_catalog() -> Vec<CatalogEntry> {
     let mut all = apple_user_cache_catalog();
     all.extend(dev_toolchain_catalog());
     all.extend(browser_catalog());
+    all.extend(apple_silicon_catalog());
+    all.extend(virtualization_catalog());
     all
 }
 

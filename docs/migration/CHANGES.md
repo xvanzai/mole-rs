@@ -229,6 +229,34 @@
 
 ---
 
+<a name="clean-3d"></a>
+## clean 深度清理（子模块 3d 第四片：Apple Silicon + 虚拟化 + Application Support 可再生缓存）
+
+### 对标记录
+
+- `clean_apple_silicon_caches` 1:1：仅 arm64 主机（IS_M_SERIES）；Rosetta 2 更新缓存 + 用户缓存 + media service 缓存 3 行。
+- `clean_virtualization_tools` 静态行 1:1：VMware/Parallels/VirtualBox/Lima/Vagrant 缓存。
+- `clean_utm_caches` 1:1：`pgrep -x UTM` 运行中整组跳过；三行（app/sandbox/tmp）。
+- `clean_application_support_logs` 核心 1:1：遍历 `~/Library/Application Support/*` → 四层应用保护（whitelist → should_protect_path → should_protect_data → is_critical_system_component）→ 仅触碰显式可再生缓存子树（Code Cache/GPUCache/Dawn*/Crashpad/completed）→ 有缓存标记的应用追加 Cache/CachedData。
+- `is_critical_system_component` 1:1：backgroundtaskmanagement/loginitems/systempreferences/settings/preferences/controlcenter/biometrickit/sfl/tcc 关键词子串。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| Apple Silicon 门 | IS_M_SERIES 运行时 uname | cfg!(target_arch = "aarch64") | 无行为变更 | 编译期等价 |
+| App Support 扫描 | 进度 spinner + bulk>100 分支 + 逐项 0.4s 测径 | 静态展开候选目录为 ScanEntry；逐目录 path_size_with_deadline | **简化** | GUI 预览天然分组；bulk/item 二分对 Trash 删除无行为差异（整目录 delete_to_trash 等价） |
+| Tart prune | tart prune owner 命令 | **未实现** | **暂缓** | owner 命令删除汇契约（同 npm/uv） |
+| Group Containers | 显式 allowlist（contentdelivery） | **未实现** | **暂缓** | 仅 1 个容器，后续小片补 |
+| Deno 排除 sweep | 整个 Library/Caches/* 排除 DENO_DIR | **未实现** | **暂缓** | 宽扫风险高，需独立设计 |
+
+### 测试
+
+- 146 个测试通过（新增：is_critical_system_component 关键词矩阵）。
+- 真机冒烟：**121 组**（原 107）；Application Support 出现可再生缓存（Xiaomi MiMo · Code Cache / GPUCache / Dawn* / Cache 等）。
+
+---
+
 <a name="status-系统监控-gpu-bt"></a>
 ## status 系统监控（增量子片：GPU + 蓝牙）
 

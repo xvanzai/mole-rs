@@ -22,7 +22,7 @@
 |---|------|-----------|----------|-----|------|
 | 1 | core 工具层（字节单位等） | `internal/units/bytes.go` | `src-tauri/src/core/units.rs` | — | ✅ 已完成 |
 | 2 | status 系统监控 | `cmd/status/*.go` | `src-tauri/src/status/` + `src/pages/StatusPage.vue` | 监控仪表盘 | ✅ 已完成（GPU/蓝牙/磁盘IO/APFS修正为后续子项） |
-| 3 | clean 深度清理 | `bin/clean.sh`、`lib/clean/*`、`lib/core/app_protection*.sh` | `src-tauri/src/clean/` + `src/pages/CleanPage.vue` | 清理页（预览→执行） | 🟢 3a+3b+3c 完成（白名单、保护层、Trash、动态探测行、**进程守卫**、浏览器族+**cargo registry 守卫**）；剩余：owner 命令删除汇、Service Worker CacheStorage、旧版本清理、system 族 |
+| 3 | clean 深度清理 | `bin/clean.sh`、`lib/clean/*`、`lib/core/app_protection*.sh` | `src-tauri/src/clean/` + `src/pages/CleanPage.vue` | 清理页（预览→执行） | 🟢 3a+3b+3c+3d 完成（白名单、保护层、Trash、动态探测、进程守卫、浏览器族、cargo 守卫、**Apple Silicon/虚拟化/App Support 可再生缓存**）；剩余：owner 命令删除汇、Service Worker、旧版本清理、deep_system（sudo） |
 | 4 | purge 项目构建产物清理 | `bin/purge.sh`、`lib/clean/project.sh` | `src-tauri/src/purge/` + `src/pages/PurgePage.vue` | 项目清理页 | ✅ 扫描 + dry-run + Trash 执行 |
 | 5 | analyze 磁盘分析 | `cmd/analyze/*.go` | `src-tauri/src/analyze/` + `src/pages/AnalyzePage.vue` | 磁盘浏览页 | ✅ 第一片完成（扫描器容量语义+浏览+删除）；缓存层/Spotlight预热/快照对比暂缓 |
 | 6 | uninstall 应用卸载 | `bin/uninstall.sh` + `lib/uninstall/*` | `src-tauri/src/uninstall/` + `src/pages/UninstallPage.vue` | 卸载页 | 🟢 6a+6b+6c 完成（清单+保护分级+本体+精确残留删除+名称变体） |

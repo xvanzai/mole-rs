@@ -122,6 +122,11 @@ pub fn qqbrowser3_process_state() -> ProcessState {
     pgrep_any(&[("-x", "QQBrowser3")])
 }
 
+/// UTM 虚拟机（对标 pgrep -x "UTM"）。
+pub fn utm_process_state() -> ProcessState {
+    pgrep_any(&[("-x", "UTM")])
+}
+
 /// 对标 `mole_clean_process_guard` 的翻译：仅 Idle 放行。
 /// 返回 (是否放行, 拒绝原因)。
 pub fn guard_allows(state: ProcessState) -> Result<(), &'static str> {
