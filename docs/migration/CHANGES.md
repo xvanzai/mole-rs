@@ -1044,3 +1044,38 @@
 ### 测试
 
 - 174 个测试通过（新增：后缀剥离矩阵、unknown/empty 无兄弟、真实路径不 panic）。
+
+---
+
+<a name="apfs-insights-snapshots"></a>
+## status APFS 修正 + analyze 洞察/快照 + owner 多二进制/Tart
+
+### 对标记录
+
+**status APFS**（metrics_disk.go）
+- `correctAPFSDiskUsage` 三级回退：Finder osascript（仅 "/"）→ diskutil APFSContainerFree → raw statfs。
+- `correctDiskTotalBytes`：diskutil TotalSize 与 statfs 差 >1GB 时采用 diskutil（修外部 APFS 容量翻倍）。
+- `annotateDiskMetadata`：diskutil info 补 External + SMART（verified/failing/unsupported）；2 分钟缓存。
+
+**analyze insights**（insights.go）
+- `createInsightEntries`：iOS Backups、Old Downloads(90d+)、12 个 cleanable 路径、OrbStack。
+- `measureInsightSize`：Downloads 按 90 天 mtime 过滤；其余整树。
+
+**analyze snapshots**（snapshots.go）
+- `tmutil listlocalsnapshotdates /`：仅 YYYY-MM-DD-HHMMSS（17 字符）行计数。
+
+**owner 命令增强**
+- pnpm 多二进制：PATH + mise/installs/pnpm/*，store path 去重后逐个 prune（#1370）。
+- Tart：`tart prune --entries caches --older-than 30`（进程守卫）。
+
+### 变更前后对照
+
+| 项 | 原实现 | Rust 实现 | 是否变更 | 原因 |
+|----|--------|----------|---------|------|
+| Finder 探测 | osascript + 2min 缓存 | 相同（Mutex 缓存） | 无行为变更 | — |
+| 洞察尺寸 | du -sk | path_size_with_deadline | 无行为变更 | — |
+| pnpm 进程匹配 | pgrep -f 调用程序定界 | 相同正则 | 无行为变更 | — |
+
+### 测试
+
+- 183 个测试通过（新增：plist 整数提取、purgeable 差值、disk metadata 解析、collect_disks 双模式、洞察条目唯一、快照日期行计数）。

@@ -102,35 +102,96 @@ fn bun_cache_path() -> Option<PathBuf> {
     Some(default)
 }
 
-/// pnpm store 路径（仅第一个可用二进制；多二进制去重逻辑见原实现）。
-fn pnpm_store_path() -> Option<PathBuf> {
-    // 对标 list_installed_pnpm_binaries 的简化：仅检查 PATH 中的 pnpm。
-    if !probe::tool_available("pnpm", &["--version"]) {
-        return None;
+/// 对标 is_safe_pnpm_store_path：绝对路径 + 无 .. / 控制字符。
+fn is_safe_pnpm_store_path(path: &str) -> bool {
+    if path.is_empty() || !path.starts_with('/') {
+        return false;
     }
-    // COREPACK_ENABLE_DOWNLOAD_PROMPT=0 避免交互下载提示。
-    let out = crate::status::run_cmd_with_env(
-        "pnpm",
-        &["store", "path"],
-        &[("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")],
-        QUICK,
-    );
-    if let Ok(o) = out {
-        let trimmed = o.trim().trim_end_matches('/').to_string();
-        // is_safe_pnpm_store_path：绝对路径 + 非 / 非 $HOME。
-        if trimmed.starts_with('/') && trimmed != "/" {
-            let home = std::env::var("HOME").unwrap_or_default();
-            if trimmed != home {
-                return Some(PathBuf::from(trimmed));
+    if path.contains("/../") || path.ends_with("/..") || path == ".." {
+        return false;
+    }
+    !path.chars().any(|c| c == '\n' || c == '\r')
+}
+
+/// 对标 list_installed_pnpm_binaries：PATH pnpm + mise 版本安装。
+/// 每个元素是 (bin, store_path)。
+fn list_pnpm_stores() -> Vec<(String, PathBuf)> {
+    let mut pairs: Vec<(String, PathBuf)> = Vec::new();
+    let mut seen_stores: Vec<PathBuf> = Vec::new();
+    let mut bins: Vec<String> = Vec::new();
+
+    // PATH pnpm。
+    if probe::tool_available("pnpm", &["--version"]) {
+        bins.push("pnpm".into());
+    }
+    // mise 安装。
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mise_root = PathBuf::from(&home).join(".local/share/mise/installs/pnpm");
+    if let Ok(entries) = std::fs::read_dir(&mise_root) {
+        for e in entries.flatten() {
+            let p = e.path().join("pnpm");
+            if p.is_file() {
+                use std::os::unix::fs::PermissionsExt;
+                if std::fs::metadata(&p)
+                    .map(|m| m.permissions().mode() & 0o111 != 0)
+                    .unwrap_or(false)
+                {
+                    bins.push(p.to_string_lossy().to_string());
+                }
             }
         }
     }
-    None
+
+    for bin in bins {
+        let bin_ref: &str = &bin;
+        let out = crate::status::run_cmd_with_env(
+            bin_ref,
+            &["store", "path"],
+            &[("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")],
+            QUICK,
+        );
+        let Ok(o) = out else { continue };
+        let trimmed = o.trim().trim_end_matches('/').to_string();
+        if !is_safe_pnpm_store_path(&trimmed) {
+            continue;
+        }
+        let store = PathBuf::from(&trimmed);
+        if seen_stores.contains(&store) {
+            continue; // 去重（#1370）
+        }
+        seen_stores.push(store.clone());
+        pairs.push((bin, store));
+    }
+    pairs
+}
+
+/// pnpm store 路径（用于预览大小；取第一个唯一 store）。
+fn pnpm_store_path() -> Option<PathBuf> {
+    list_pnpm_stores().into_iter().next().map(|(_, p)| p)
 }
 
 /// pnpm 进程守卫（对标 pnpm_process_blocks_prune：Running/Unknown 均阻断）。
 fn pnpm_process_blocks() -> ProcessState {
     process::pnpm_process_state()
+}
+
+/// Tart 缓存根（对标 clean_tart_caches）。
+fn tart_cache_path() -> Option<PathBuf> {
+    if !probe::tool_available("tart", &["--version"]) {
+        return None;
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let p = PathBuf::from(home).join(".tart/cache");
+    if p.is_dir() {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+/// Tart 进程守卫。
+fn tart_process_blocks() -> ProcessState {
+    process::tart_process_state()
 }
 
 fn npm_owner_cmd(_path: &Path) -> Option<OwnerCmd> {
@@ -179,12 +240,28 @@ fn bun_owner_cmd(_path: &Path) -> Option<OwnerCmd> {
 }
 
 fn pnpm_owner_cmd(bin_path: &Path) -> Option<OwnerCmd> {
-    // bin_path 实际是 store 根；命令仍用 pnpm。
+    // bin_path 实际是 store 根；命令仍用 pnpm（多二进制在 execute 中特殊处理）。
     let _ = bin_path;
     Some(OwnerCmd {
         bin: "pnpm".into(),
         args: vec!["store".into(), "prune".into()],
         env: vec![("COREPACK_ENABLE_DOWNLOAD_PROMPT".into(), "0".into())],
+    })
+}
+
+/// 对标 clean_tart_caches 的 owner 命令：tart prune --entries caches --older-than 30。
+fn tart_owner_cmd(_path: &Path) -> Option<OwnerCmd> {
+    // MOLE_ORPHAN_AGE_DAYS 默认 30。
+    Some(OwnerCmd {
+        bin: "tart".into(),
+        args: vec![
+            "prune".into(),
+            "--entries".into(),
+            "caches".into(),
+            "--older-than".into(),
+            "30".into(),
+        ],
+        env: vec![],
     })
 }
 
@@ -227,6 +304,12 @@ pub fn owner_clean_ops() -> Vec<OwnerCleanOp> {
             owner_command: pnpm_owner_cmd,
             process_probe: Some(pnpm_process_blocks),
         },
+        OwnerCleanOp {
+            description: "Tart caches (owner command)",
+            resolve_cache_path: tart_cache_path,
+            owner_command: tart_owner_cmd,
+            process_probe: Some(tart_process_blocks),
+        },
     ]
 }
 
@@ -263,6 +346,50 @@ pub fn execute_owner_clean(op: &OwnerCleanOp, dry_run: bool) -> (bool, String) {
     }
 
     let size = super::path_size_with_deadline(&path, std::time::Instant::now() + Duration::from_secs(5));
+
+    // pnpm 多二进制：逐唯一 store 执行 prune（对标 list_installed_pnpm_binaries）。
+    if op.description.contains("pnpm") {
+        if dry_run {
+            let stores = list_pnpm_stores();
+            return (
+                true,
+                format!("将对 {} 个 pnpm store 执行 prune（合计约 {} KB）", stores.len(), size / 1024),
+            );
+        }
+        let stores = list_pnpm_stores();
+        if stores.is_empty() {
+            return (false, "无可用 pnpm store".into());
+        }
+        let mut ok_count = 0usize;
+        let mut fail_count = 0usize;
+        for (bin, store) in &stores {
+            let store_str = store.to_string_lossy().to_string();
+            if protect::should_protect_path(&store_str) {
+                fail_count += 1;
+                continue;
+            }
+            let result = crate::status::run_cmd_with_env(
+                bin,
+                &["store", "prune"],
+                &[("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")],
+                PKG_CLEANUP,
+            );
+            if result.is_ok() {
+                ok_count += 1;
+            } else {
+                fail_count += 1;
+            }
+        }
+        if fail_count > 0 && ok_count == 0 {
+            return (false, format!("全部 {fail_count} 个 store prune 失败"));
+        }
+        return (
+            true,
+            format!("已 prune {ok_count} 个 store{}（合计约 {} KB）",
+                if fail_count > 0 { format!("，{fail_count} 失败") } else { String::new() },
+                size / 1024),
+        );
+    }
 
     if dry_run {
         return (

@@ -118,6 +118,24 @@ pub mod analyze {
         super::blocking(move || crate::analyze::cached_scan(&path)).await
     }
 
+    /// 隐藏空间洞察条目（对标 createInsightEntries）。
+    #[tauri::command]
+    pub async fn analyze_insights() -> Result<Vec<crate::analyze::DirEntry>, String> {
+        super::blocking(crate::analyze::insights::create_insight_entries).await
+    }
+
+    /// 洞察路径大小测量（Downloads 按 90 天过滤）。
+    #[tauri::command]
+    pub async fn analyze_insight_size(path: String) -> Result<u64, String> {
+        super::blocking(move || crate::analyze::insights::measure_insight_size(&path)).await
+    }
+
+    /// 本地 Time Machine 快照数量（tmutil；不可用返回 null）。
+    #[tauri::command]
+    pub async fn analyze_local_snapshots() -> Result<Option<usize>, String> {
+        super::blocking(crate::analyze::snapshots::count_local_snapshots).await
+    }
+
     /// 从当前浏览层删除选中条目（仅直接子项，走 Trash 安全删除）。
     #[tauri::command]
     pub async fn analyze_delete(

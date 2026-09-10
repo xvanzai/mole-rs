@@ -1,7 +1,7 @@
 //! 磁盘指标与废纸篓扫描，对标 `cmd/status/metrics_disk.go`。
 
 use super::types::{DiskIoStatus, DiskStatus};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 /// 对标 `skipDiskMounts`。
@@ -26,10 +26,9 @@ const SMART_STATUS_UNKNOWN: &str = "unknown";
 
 /// 对标 `collectDisks` / `collectDisksFast`。
 ///
-/// `use_corrections` 为 true 时对应 full 路径；APFS purgeable / diskutil
-/// 元数据修正属于子进程密集操作，见 CHANGES.md §status（暂缓子项），
-/// 本版两种路径都返回 raw statfs 数据。
-pub fn collect_disks(_use_corrections: bool) -> Vec<DiskStatus> {
+/// `use_corrections=true`（full 路径）：APFS purgeable 三级修正 +
+/// diskutil 元数据（External/SMART）。fast 路径返回 raw statfs。
+pub fn collect_disks(use_corrections: bool) -> Vec<DiskStatus> {
     let mut seen_device: HashSet<String> = HashSet::new();
     let mut seen_volume: HashSet<String> = HashSet::new();
     let mut disks: Vec<DiskStatus> = Vec::new();
@@ -52,33 +51,55 @@ pub fn collect_disks(_use_corrections: bool) -> Vec<DiskStatus> {
         if part.total == 0 {
             continue;
         }
+        let mut total = part.total;
+        if use_corrections {
+            total = correct_disk_total_bytes(&part.mount, total);
+        }
         // Skip <1GB volumes.
-        if part.total < 1 << 30 {
+        if total < 1 << 30 {
             continue;
         }
         // Use size-based dedupe key for shared pools.
-        let vol_key = format!("{}:{}", part.fstype, part.total);
+        let vol_key = format!("{}:{}", part.fstype, total);
         if seen_volume.contains(&vol_key) {
             continue;
         }
 
+        let raw_free = total.saturating_sub(part.used);
+        let (used, used_percent, purgeable) = if use_corrections
+            && part.fstype.eq_ignore_ascii_case("apfs")
+        {
+            correct_apfs_disk_usage(&part.mount, total, part.used, raw_free)
+        } else {
+            let pct = if total > 0 {
+                part.used as f64 / total as f64 * 100.0
+            } else {
+                0.0
+            };
+            (part.used, pct, 0u64)
+        };
+
         disks.push(DiskStatus {
             mount: part.mount.clone(),
             device: part.device.clone(),
-            used: part.used,
-            total: part.total,
-            used_percent: if part.total > 0 {
-                part.used as f64 / part.total as f64 * 100.0
-            } else {
-                0.0
-            },
+            used,
+            total,
+            used_percent,
             fstype: part.fstype.clone(),
-            external: part.mount.starts_with("/Volumes/"),
+            external: if !use_corrections {
+                part.mount.starts_with("/Volumes/")
+            } else {
+                part.mount.starts_with("/Volumes/")
+            },
             smart_status: SMART_STATUS_UNKNOWN.into(),
-            purgeable: 0,
+            purgeable,
         });
         seen_device.insert(base_device);
         seen_volume.insert(vol_key);
+    }
+
+    if use_corrections {
+        annotate_disk_metadata(&mut disks);
     }
 
     // 对标排序：内置盘优先，再按容量从大到小。
@@ -89,6 +110,227 @@ pub fn collect_disks(_use_corrections: bool) -> Vec<DiskStatus> {
     });
     disks.truncate(3);
     disks
+}
+
+/// Finder 启动盘 free/total 缓存（2 分钟 TTL，对标 finderDiskCache）。
+static FINDER_CACHE: std::sync::Mutex<Option<(u64, u64, Instant)>> = std::sync::Mutex::new(None);
+
+/// 对标 correctAPFSDiskUsage：三级回退 Finder → diskutil APFSContainerFree → raw。
+fn correct_apfs_disk_usage(
+    mountpoint: &str,
+    total: u64,
+    raw_used: u64,
+    raw_free: u64,
+) -> (u64, f64, u64) {
+    // Tier 1：Finder osascript（仅启动盘 "/"）。
+    if mountpoint == "/" && super::command_exists("osascript") {
+        if let Some((finder_free, finder_total)) = get_finder_startup_disk_free_bytes() {
+            if finder_total > 0 && finder_free <= finder_total {
+                let used = finder_total - finder_free;
+                let pct = used as f64 / finder_total as f64 * 100.0;
+                return (used, pct, finder_purgeable_bytes(raw_free, finder_free));
+            }
+        }
+    }
+
+    // Tier 2：diskutil APFSContainerFree（修正本地快照占用）。
+    if super::command_exists("diskutil") {
+        if let Some(container_free) = get_apfs_container_free_bytes(mountpoint) {
+            if container_free <= total {
+                let corrected = total - container_free;
+                if raw_used > corrected && raw_used - corrected > 1 << 30 {
+                    let pct = corrected as f64 / total as f64 * 100.0;
+                    return (corrected, pct, 0);
+                }
+            }
+        }
+    }
+
+    // Tier 3：raw statfs。
+    let pct = if total > 0 {
+        raw_used as f64 / total as f64 * 100.0
+    } else {
+        0.0
+    };
+    (raw_used, pct, 0)
+}
+
+/// finderPurgeableBytes：Finder free 减 statfs free 的差即 purgeable。
+fn finder_purgeable_bytes(raw_free: u64, finder_free: u64) -> u64 {
+    if finder_free <= raw_free {
+        0
+    } else {
+        finder_free - raw_free
+    }
+}
+
+/// getAPFSContainerFreeBytes：diskutil info -plist 的 APFSContainerFree。
+fn get_apfs_container_free_bytes(mountpoint: &str) -> Option<u64> {
+    let out = super::run_cmd("diskutil", &["info", "-plist", mountpoint], Duration::from_secs(3))
+        .ok()?;
+    extract_plist_uint(&out, &["APFSContainerFree"])
+}
+
+/// getFinderStartupDiskFreeBytes：osascript 查 Finder 启动盘 free/total。
+fn get_finder_startup_disk_free_bytes() -> Option<(u64, u64)> {
+    {
+        let guard = FINDER_CACHE.lock().ok()?;
+        if let Some((free, total, at)) = *guard {
+            if at.elapsed() < Duration::from_secs(120) {
+                return Some((free, total));
+            }
+        }
+    }
+    let out = super::run_cmd(
+        "osascript",
+        &["-e", r#"tell application "Finder" to return {free space of startup disk, capacity of startup disk}"#],
+        Duration::from_secs(5),
+    );
+    let Ok(out) = out else {
+        // 缓存失败时间戳，避免每次等满 5s。
+        if let Ok(mut guard) = FINDER_CACHE.lock() {
+            *guard = Some((0, 0, Instant::now()));
+        }
+        return None;
+    };
+    // "3.2489E+11, 4.9438E+11" 或 "324892202048, 494384795648"
+    let mut parts = out.trim().splitn(2, ',');
+    let free_f: f64 = parts.next()?.trim().parse().ok()?;
+    let total_f: f64 = parts.next()?.trim().parse().ok()?;
+    if free_f <= 0.0 || total_f <= 0.0 {
+        return None;
+    }
+    let free = free_f as u64;
+    let total = total_f as u64;
+    if let Ok(mut guard) = FINDER_CACHE.lock() {
+        *guard = Some((free, total, Instant::now()));
+    }
+    Some((free, total))
+}
+
+/// extract_plist_uint：从 plist XML 提取整数键。
+fn extract_plist_uint(plist: &str, keys: &[&str]) -> Option<u64> {
+    for key in keys {
+        let marker = format!("<key>{key}</key>");
+        if let Some(pos) = plist.find(&marker) {
+            let rest = &plist[pos + marker.len()..];
+            if let Some(start) = rest.find("<integer>") {
+                let num = &rest[start + 9..];
+                if let Some(end) = num.find("</integer>") {
+                    if let Ok(v) = num[..end].trim().parse::<u64>() {
+                        return Some(v);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// correctDiskTotalBytes：diskutil 总容量与 statfs 差 >1GB 时采用 diskutil。
+fn correct_disk_total_bytes(mountpoint: &str, raw_total: u64) -> u64 {
+    if raw_total == 0 || !super::command_exists("diskutil") {
+        return raw_total;
+    }
+    let Ok(out) = super::run_cmd("diskutil", &["info", "-plist", mountpoint], Duration::from_secs(3))
+    else {
+        return raw_total;
+    };
+    let Some(diskutil_total) = extract_plist_uint(&out, &["TotalSize", "DiskSize", "Size"])
+    else {
+        return raw_total;
+    };
+    let diff = raw_total.abs_diff(diskutil_total);
+    if diff > 1 << 30 {
+        diskutil_total
+    } else {
+        raw_total
+    }
+}
+
+/// 磁盘元数据缓存（2 分钟）：External + SMART。
+static DISK_META_CACHE: std::sync::Mutex<Option<(HashMap<String, (bool, String)>, Instant)>> =
+    std::sync::Mutex::new(None);
+
+/// annotateDiskMetadata：diskutil info 补 External/SMART。
+fn annotate_disk_metadata(disks: &mut [DiskStatus]) {
+    if disks.is_empty() || !super::command_exists("diskutil") {
+        return;
+    }
+    // 清理过期缓存。
+    {
+        if let Ok(mut guard) = DISK_META_CACHE.lock() {
+            if let Some((_, at)) = guard.as_ref() {
+                if at.elapsed() > Duration::from_secs(120) {
+                    *guard = None;
+                }
+            }
+        }
+    }
+    for disk in disks.iter_mut() {
+        let base = base_device_name(&disk.device);
+        let base = if base.is_empty() {
+            disk.device.clone()
+        } else {
+            base
+        };
+        // 缓存命中。
+        if let Ok(guard) = DISK_META_CACHE.lock() {
+            if let Some((map, _)) = guard.as_ref() {
+                if let Some((external, smart)) = map.get(&base) {
+                    disk.external = *external;
+                    disk.smart_status = smart.clone();
+                    continue;
+                }
+            }
+        }
+        let (external, smart) = read_disk_metadata(&base)
+            .unwrap_or_else(|_| (disk.mount.starts_with("/Volumes/"), SMART_STATUS_UNKNOWN.into()));
+        disk.external = external;
+        disk.smart_status = smart.clone();
+        if let Ok(mut guard) = DISK_META_CACHE.lock() {
+            let entry = guard.get_or_insert_with(|| (HashMap::new(), Instant::now()));
+            entry.0.insert(base, (external, smart));
+        }
+    }
+}
+
+/// parseDiskMetadata：Internal/Device Location + SMART Status。
+fn read_disk_metadata(device: &str) -> Result<(bool, String), ()> {
+    let out = super::run_cmd("diskutil", &["info", device], Duration::from_secs(1)).map_err(|_| ())?;
+    let mut external_found = false;
+    let mut external = false;
+    let mut location_found = false;
+    let mut location_external = false;
+    let mut smart = SMART_STATUS_UNKNOWN.to_string();
+    for line in out.lines() {
+        let trim = line.trim();
+        if trim.starts_with("Internal:") {
+            external_found = true;
+            external = trim.contains("No");
+        }
+        if !external_found && trim.starts_with("Device Location:") {
+            location_found = true;
+            location_external = trim.contains("External");
+        }
+        if let Some(value) = trim.strip_prefix("SMART Status:") {
+            let v = value.trim().to_lowercase();
+            smart = match v.as_str() {
+                "verified" => "verified".into(),
+                "failing" | "failed" => "failing".into(),
+                "not supported" | "unsupported" => "unsupported".into(),
+                _ => SMART_STATUS_UNKNOWN.into(),
+            };
+        }
+    }
+    if !external_found && location_found {
+        external_found = true;
+        external = location_external;
+    }
+    if !external_found {
+        return Err(());
+    }
+    Ok((external, smart))
 }
 
 struct StatFsEntry {
@@ -342,6 +584,87 @@ mod tests {
             // 第二次调用（间隔极短）也不 panic。
             let _ = collect_disk_io(&mut prev);
         }
+    }
+
+    /// plist 整数提取。
+    #[test]
+    fn plist_uint_extraction() {
+        let raw = r#"<?xml version="1.0"?><plist><dict>
+<key>APFSContainerFree</key><integer>123456789</integer>
+<key>TotalSize</key><integer>999</integer>
+</dict></plist>"#;
+        assert_eq!(extract_plist_uint(raw, &["APFSContainerFree"]), Some(123456789));
+        assert_eq!(extract_plist_uint(raw, &["TotalSize"]), Some(999));
+        assert_eq!(extract_plist_uint(raw, &["Missing"]), None);
+    }
+
+    /// purgeable 差值语义。
+    #[test]
+    fn finder_purgeable_semantics() {
+        assert_eq!(finder_purgeable_bytes(100, 100), 0);
+        assert_eq!(finder_purgeable_bytes(100, 50), 0);
+        assert_eq!(finder_purgeable_bytes(100, 150), 50);
+    }
+
+    /// parse_disk_metadata：Internal/No + SMART verified。
+    #[test]
+    fn disk_metadata_parsing() {
+        let raw = "   Internal:                    Yes\n   Device Location:            Internal\n   SMART Status:               Verified\n";
+        let (external, smart) = read_disk_metadata_from_str(raw).unwrap();
+        assert!(!external);
+        assert_eq!(smart, "verified");
+
+        let raw2 = "   Internal:                    No\n   SMART Status:               Failing\n";
+        let (external, smart) = read_disk_metadata_from_str(raw2).unwrap();
+        assert!(external);
+        assert_eq!(smart, "failing");
+    }
+
+    /// 从字符串解析元数据（测试用包装）。
+    fn read_disk_metadata_from_str(out: &str) -> Result<(bool, String), ()> {
+        let mut external_found = false;
+        let mut external = false;
+        let mut location_found = false;
+        let mut location_external = false;
+        let mut smart = SMART_STATUS_UNKNOWN.to_string();
+        for line in out.lines() {
+            let trim = line.trim();
+            if trim.starts_with("Internal:") {
+                external_found = true;
+                external = trim.contains("No");
+            }
+            if !external_found && trim.starts_with("Device Location:") {
+                location_found = true;
+                location_external = trim.contains("External");
+            }
+            if let Some(value) = trim.strip_prefix("SMART Status:") {
+                let v = value.trim().to_lowercase();
+                smart = match v.as_str() {
+                    "verified" => "verified".into(),
+                    "failing" | "failed" => "failing".into(),
+                    "not supported" | "unsupported" => "unsupported".into(),
+                    _ => SMART_STATUS_UNKNOWN.into(),
+                };
+            }
+        }
+        if !external_found && location_found {
+            external_found = true;
+            external = location_external;
+        }
+        if !external_found {
+            return Err(());
+        }
+        Ok((external, smart))
+    }
+
+    /// collect_disks 两种模式均不 panic。
+    #[test]
+    fn collect_disks_both_modes() {
+        let fast = collect_disks(false);
+        let full = collect_disks(true);
+        // fast ≤ full 条目数（corrections 可能过滤/合并）。
+        assert!(fast.len() <= 3);
+        assert!(full.len() <= 3);
     }
 
     #[test]

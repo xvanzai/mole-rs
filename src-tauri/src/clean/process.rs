@@ -132,9 +132,18 @@ pub fn utm_process_state() -> ProcessState {
     pgrep_any(&[("-x", "UTM")])
 }
 
+/// Tart 虚拟机（对标 clean_tart_caches 的 mole_pgrep_any -x tart）。
+pub fn tart_process_state() -> ProcessState {
+    pgrep_any(&[("-x", "tart")])
+}
+
 /// pnpm（对标 pnpm_process_blocks_prune：Running/Unknown 均阻断 prune）。
+/// 匹配调用程序而非 argv 子串（pnpm-lock.yaml 不得永久阻断，#1370）。
 pub fn pnpm_process_state() -> ProcessState {
-    pgrep_any(&[("-x", "pnpm")])
+    pgrep_any(&[(
+        "-f",
+        "(^|/)pnpm(\\.cjs)?([[:space:]]|$)",
+    )])
 }
 
 /// Dropbox。

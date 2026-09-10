@@ -19,6 +19,8 @@ use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 pub mod cache;
+pub mod insights;
+pub mod snapshots;
 
 /// 扫描总预算（对标 duTimeout = 30s）。
 const SCAN_DEADLINE: Duration = Duration::from_secs(30);
