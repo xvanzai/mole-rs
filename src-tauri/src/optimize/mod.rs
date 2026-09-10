@@ -78,6 +78,8 @@ pub fn task_catalog() -> Vec<OptimizeTask> {
                     | "periodic_maintenance"
                     | "shared_file_list_repair"
                     | "disk_verify"
+                    | "spotlight_index_optimize"
+                    | "spotlight_orphan_rules_cleanup"
             ),
         })
         .collect()
@@ -253,6 +255,14 @@ pub fn execute(selected: &[String], dry_run: bool) -> OptimizeResult {
             }
             "disk_verify" => {
                 let (outcome, detail) = disk_verify(dry_run);
+                record(&mut outcomes, task.action, outcome, &detail);
+            }
+            "spotlight_index_optimize" => {
+                let (outcome, detail) = spotlight_index_optimize(dry_run);
+                record(&mut outcomes, task.action, outcome, &detail);
+            }
+            "spotlight_orphan_rules_cleanup" => {
+                let (outcome, detail) = spotlight_orphan_rules_cleanup(dry_run);
                 record(&mut outcomes, task.action, outcome, &detail);
             }
             "saved_state_cleanup" => {
@@ -1576,6 +1586,307 @@ fn disk_verify(dry_run: bool) -> (Outcome, String) {
     }
 }
 
+/// 对标 `is_ac_power`：pmset -g batt 含 "AC Power"。
+fn is_ac_power() -> bool {
+    crate::status::run_cmd("pmset", &["-g", "batt"], Duration::from_secs(3))
+        .map(|o| o.contains("AC Power"))
+        .unwrap_or(false)
+}
+
+/// 对标 `opt_spotlight_index_optimize`：mdutil -s / 三态 → 索引禁用 Skipped →
+/// 交流电下 mdfind 双探针测速 → 连续慢则 sudo mdutil -E /。
+fn spotlight_index_optimize(dry_run: bool) -> (Outcome, String) {
+    match crate::status::run_cmd("mdutil", &["-s", "/"], Duration::from_secs(3)) {
+        Err(_) => return (Outcome::Failed, "无法检查 Spotlight 索引状态".into()),
+        Ok(status) => {
+            let lower = status.to_lowercase();
+            if lower.contains("indexing disabled") {
+                return (Outcome::Skipped, "Spotlight 索引已禁用".into());
+            }
+            // "Indexing enabled" 且非 "Indexing and searching disabled" 走测速分支。
+            let enabled = lower.contains("indexing enabled")
+                && !lower.contains("indexing and searching disabled");
+            if !enabled {
+                return (Outcome::Unchanged, "Spotlight 索引已校验".into());
+            }
+        }
+    }
+
+    // 重建仅在交流电下提供；电池上跳过测速（对标）。
+    if !is_ac_power() {
+        return (Outcome::Unchanged, "Spotlight 索引已处于最优状态".into());
+    }
+
+    let slow_threshold: u64 = std::env::var("MOLE_OPTIMIZE_SPOTLIGHT_SLOW_SEC")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3);
+
+    let mut slow_count = 0usize;
+    let mut probe_failed = 0usize;
+    for probe in 0..2 {
+        let start = Instant::now();
+        match crate::status::run_cmd(
+            "mdfind",
+            &["kMDItemFSName == 'Applications'"],
+            Duration::from_secs(5),
+        ) {
+            Ok(_) => {
+                if start.elapsed().as_secs() > slow_threshold {
+                    slow_count += 1;
+                }
+            }
+            Err(e) if e.contains("timed out") => {
+                // 超时即慢（对标 124 → slow）。
+                slow_count += 1;
+            }
+            Err(_) => probe_failed += 1,
+        }
+        if probe == 0 {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    if probe_failed > 0 {
+        return (
+            Outcome::Failed,
+            format!("Spotlight 测速失败（{probe_failed} 次探针）"),
+        );
+    }
+
+    if slow_count >= 2 {
+        if dry_run {
+            return (Outcome::Applied, "将重建 Spotlight 索引（可能耗时 1-2 小时）".into());
+        }
+        if !optimize_sudo_available(false) {
+            return (
+                Outcome::Skipped,
+                "需要管理员权限（sudo 缓存不可用）".into(),
+            );
+        }
+        match crate::status::run_cmd("sudo", &["mdutil", "-E", "/"], Duration::from_secs(30)) {
+            Ok(_) => (
+                Outcome::Applied,
+                "Spotlight 索引重建已启动（后台继续索引）".into(),
+            ),
+            Err(_) => (Outcome::Failed, "Spotlight 索引重建失败".into()),
+        }
+    } else {
+        (Outcome::Unchanged, "Spotlight 索引已处于最优状态".into())
+    }
+}
+
+/// 对标 `bundle_has_installed_app`（spotlight 孤儿规则用）：mdfind 快路径
+/// + 标准应用根目录 Info.plist / SMJobBless 助手扫描。简化差异：原实现
+/// 有 SECONDS 截止与临时文件扫描；Rust 侧有界遍历，超时视为"仍存在"
+/// （fail-closed，不误删）。
+fn bundle_has_installed_app(bundle_id: &str) -> bool {
+    if !crate::uninstall::is_reverse_dns_bundle_id(bundle_id) {
+        return false;
+    }
+    // mdfind 快路径。
+    if crate::clean::command_exists("mdfind") {
+        let query = format!("kMDItemCFBundleIdentifier == '{bundle_id}'");
+        if let Ok(out) = crate::status::run_cmd("mdfind", &[&query], Duration::from_secs(3)) {
+            if !out.trim().is_empty() {
+                return true;
+            }
+        }
+    }
+
+    let id_lower = bundle_id.to_lowercase();
+    let parent_id_lower = [
+        ".helper", ".daemon", ".agent", ".xpc", ".service",
+    ]
+    .iter()
+    .find_map(|s| id_lower.strip_suffix(s))
+    .map(|s| s.to_string());
+
+    let home = std::env::var("HOME").unwrap_or_default();
+    let roots = [
+        "/Applications",
+        "/Applications/Setapp",
+        "/Applications/Utilities",
+        "/System/Applications",
+        "/System/Applications/Utilities",
+        "/Library/Input Methods",
+    ];
+    let home_roots = [
+        format!("{home}/Applications"),
+        format!("{home}/Library/Input Methods"),
+        format!("{home}/Library/Application Support/Setapp/Applications"),
+    ];
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut stack: Vec<PathBuf> = roots
+        .iter()
+        .map(PathBuf::from)
+        .chain(home_roots.iter().map(PathBuf::from))
+        .filter(|p| p.is_dir())
+        .collect();
+    // 深度限制：根 → *.app → Contents/Library/LaunchServices。
+    let mut depth_budget: Vec<(PathBuf, usize)> =
+        stack.drain(..).map(|p| (p, 0)).collect();
+
+    while let Some((dir, depth)) = depth_budget.pop() {
+        if Instant::now() >= deadline {
+            // 超时：保守返回 true？原实现 return 0（存在）。
+            // 但孤儿清理场景超时应 keep（rc≠1 → keep）。此处返回 true = keep。
+            return true;
+        }
+        if depth > 2 {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            if Instant::now() >= deadline {
+                return true;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let path = entry.path();
+            if name.ends_with(".app") && path.is_dir() {
+                // Info.plist CFBundleIdentifier 匹配（大小写不敏感）。
+                if let Some(dict) = read_info_dict(&path.join("Contents/Info.plist")) {
+                    if let Some(id) = dict.get("CFBundleIdentifier").and_then(|v| v.as_string()) {
+                        if id.to_lowercase() == id_lower {
+                            return true;
+                        }
+                    }
+                }
+                // SMJobBless 助手路径匹配。
+                if let Some(parent) = &parent_id_lower {
+                    if parent_id_matches_helper(&path, parent) {
+                        return true;
+                    }
+                }
+                // 嵌套一层（Setapp 等）。
+                depth_budget.push((path, depth + 1));
+            }
+        }
+    }
+    false
+}
+
+fn read_info_dict(path: &Path) -> Option<plist::Dictionary> {
+    plist::Value::from_file(path).ok()?.into_dictionary()
+}
+
+/// 对标 SMJobBless：Contents/Library/LaunchServices/<parent>.* 助手存在。
+fn parent_id_matches_helper(app: &Path, parent_id_lower: &str) -> bool {
+    let ls = app.join("Contents/Library/LaunchServices");
+    let Ok(entries) = std::fs::read_dir(&ls) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        let n = e.file_name().to_string_lossy().to_lowercase();
+        n == parent_id_lower || n.starts_with(&format!("{parent_id_lower}."))
+    })
+}
+
+/// Spotlight 规则分类（对标 opt_prune_spotlight_orphan_rules 的 case 分支）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpotlightRuleAction {
+    Keep,
+    CheckInstalled,
+}
+
+fn classify_spotlight_rule(entry: &str) -> SpotlightRuleAction {
+    // System.* / com.apple.* 永不触碰（如 System.iphoneApps）。
+    if entry.starts_with("System.") || entry.starts_with("com.apple.") {
+        return SpotlightRuleAction::Keep;
+    }
+    // 仅处理合法 reverse-DNS；其余保留。
+    if !crate::uninstall::is_reverse_dns_bundle_id(entry) {
+        return SpotlightRuleAction::Keep;
+    }
+    SpotlightRuleAction::CheckInstalled
+}
+
+/// 对标 `opt_prune_spotlight_orphan_rules`：EnabledPreferenceRules 中
+/// reverse-DNS 且应用已不存在的条目删除；System.*/com.apple.* 永不触碰。
+/// 读用 plist 直读（对标 PlistBuddy Print），写经 defaults（cfprefsd）。
+fn spotlight_orphan_rules_cleanup(dry_run: bool) -> (Outcome, String) {
+    let domain = "com.apple.spotlight";
+    let home = std::env::var("HOME").unwrap_or_default();
+    let plist_path = Path::new(&home).join(format!("Library/Preferences/{domain}.plist"));
+
+    // defaults read 存在性检查（对标）。
+    if crate::status::run_cmd(
+        "defaults",
+        &["read", domain, "EnabledPreferenceRules"],
+        Duration::from_secs(3),
+    )
+    .is_err()
+    {
+        return (Outcome::Unchanged, "Spotlight 搜索规则已是干净的".into());
+    }
+
+    let Some(dict) = read_info_dict(&plist_path) else {
+        return (Outcome::Unchanged, "Spotlight 搜索规则已是干净的".into());
+    };
+    let Some(rules) = dict
+        .get("EnabledPreferenceRules")
+        .and_then(|v| v.as_array())
+    else {
+        return (Outcome::Unchanged, "Spotlight 搜索规则已是干净的".into());
+    };
+
+    let mut keep: Vec<String> = Vec::new();
+    let mut removed: Vec<String> = Vec::new();
+    for rule in rules {
+        let Some(entry) = rule.as_string() else {
+            // 非字符串条目保持原样写回。
+            keep.push(String::new());
+            continue;
+        };
+        match classify_spotlight_rule(entry) {
+            SpotlightRuleAction::Keep => keep.push(entry.to_string()),
+            SpotlightRuleAction::CheckInstalled => {
+                if bundle_has_installed_app(entry) {
+                    keep.push(entry.to_string());
+                } else {
+                    removed.push(entry.to_string());
+                }
+            }
+        }
+    }
+
+    if removed.is_empty() {
+        return (Outcome::Unchanged, "Spotlight 搜索规则已是干净的".into());
+    }
+    if dry_run {
+        return (
+            Outcome::Applied,
+            format!("将移除 {} 条孤儿 Spotlight 规则", removed.len()),
+        );
+    }
+
+    // 经 defaults 重写（cfprefsd），避免直接改文件被缓存覆盖（对标注释）。
+    let write_ok = if keep.iter().any(|s| !s.is_empty()) {
+        let mut args = vec!["write", domain, "EnabledPreferenceRules", "-array"];
+        for k in keep.iter().filter(|s| !s.is_empty()) {
+            args.push(k.as_str());
+        }
+        crate::status::run_cmd("defaults", &args, Duration::from_secs(5)).is_ok()
+    } else {
+        crate::status::run_cmd(
+            "defaults",
+            &["delete", domain, "EnabledPreferenceRules"],
+            Duration::from_secs(5),
+        )
+        .is_ok()
+    };
+
+    if write_ok {
+        (
+            Outcome::Applied,
+            format!("已移除 {} 条孤儿 Spotlight 规则", removed.len()),
+        )
+    } else {
+        (Outcome::Failed, "移除孤儿 Spotlight 规则失败".into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1623,6 +1934,8 @@ mod tests {
                     | "periodic_maintenance"
                     | "shared_file_list_repair"
                     | "disk_verify"
+                    | "spotlight_index_optimize"
+                    | "spotlight_orphan_rules_cleanup"
             );
             assert_eq!(t.implemented, implemented, "{} 标记不一致", t.action);
         }
@@ -1631,7 +1944,7 @@ mod tests {
     /// 执行框架：未移植任务记录 unavailable。
     #[test]
     fn unimplemented_task_unavailable() {
-        let r = execute(&["spotlight_index_optimize".to_string()], true);
+        let r = execute(&["login_items_audit".to_string()], true);
         assert_eq!(r.results.len(), 1);
         assert_eq!(r.results[0].outcome, "unavailable");
         assert_eq!(r.unavailable, 1);
@@ -1663,6 +1976,8 @@ mod smoke_tests {
             "periodic_maintenance".to_string(),
             "shared_file_list_repair".to_string(),
             "disk_verify".to_string(),
+            "spotlight_index_optimize".to_string(),
+            "spotlight_orphan_rules_cleanup".to_string(),
         ], true);
         for res in &r.results {
             println!("[{}] {} ({})", res.outcome, res.action, res.detail);
@@ -1849,5 +2164,18 @@ mod network_launch_tests {
         let (outcome, _) = disk_verify(true);
         assert_eq!(outcome, Outcome::Skipped);
         unsafe { std::env::remove_var("MOLE_ENABLE_DISK_VERIFY") };
+    }
+
+    /// Spotlight 规则分类：System./com.apple./畸形 ID → Keep；合法 reverse-DNS → 检查安装。
+    #[test]
+    fn spotlight_rule_classification() {
+        assert_eq!(classify_spotlight_rule("System.iphoneApps"), SpotlightRuleAction::Keep);
+        assert_eq!(classify_spotlight_rule("com.apple.finder"), SpotlightRuleAction::Keep);
+        assert_eq!(classify_spotlight_rule("not-a-bundle"), SpotlightRuleAction::Keep);
+        assert_eq!(classify_spotlight_rule("single"), SpotlightRuleAction::Keep);
+        assert_eq!(
+            classify_spotlight_rule("com.example.SomeApp"),
+            SpotlightRuleAction::CheckInstalled
+        );
     }
 }

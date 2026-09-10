@@ -732,3 +732,28 @@
 - 135 个测试通过（新增：disk_verify 默认门控 + dry-run 跳过）。
 - 真机 dry-run 冒烟：shared_file_list_repair → unchanged（全部健康）；disk_verify → skipped（门控关闭）。
 - optimize 已移植 **18/21** 处理器。
+
+---
+
+<a name="optimize-7k"></a>
+## optimize 优化维护（模块7第十一片：spotlight_index_optimize + spotlight_orphan_rules_cleanup）
+
+### 对标记录
+
+- `opt_spotlight_index_optimize` 1:1：mdutil -s / 三态 → Indexing disabled Skipped → enabled 且交流电下 mdfind 双探针测速（超时=慢）→ slow≥2 → sudo mdutil -E /；电池上跳过测速记 Unchanged。
+- `opt_prune_spotlight_orphan_rules` 1:1：defaults read 存在性 → EnabledPreferenceRules 逐条：System.*/com.apple.* 保留；非 reverse-DNS 保留；合法 ID 查安装（mdfind + 应用根扫描 + SMJobBless）→ 不存在则移除 → defaults write/delete（cfprefsd，非直改文件）。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| 规则读取 | PlistBuddy Print 逐索引 | plist crate 直读数组 | 实现差异（语义一致） | 免每条 fork |
+| bundle 解析 | bundle_has_installed_app（SECONDS 截止 + 临时文件 find） | mdfind + 有界根扫描（8s，超时 fail-closed keep） | **简化** | 原 SECONDS 全局截止在 GUI 线程池无对应物；超时视为"仍存在"避免误删 |
+| 测速计时 | get_epoch_seconds 秒差 | Instant elapsed | 无行为变更 | 阈值同为整数秒 |
+| 写回 | defaults write -array | 相同 | 无行为变更 | 必经 cfprefsd |
+
+### 测试
+
+- 136 个测试通过（新增：规则分类矩阵——System./com.apple./畸形/合法 ID）。
+- 真机 dry-run 冒烟：spotlight_index_optimize → unchanged（索引最优）；spotlight_orphan_rules_cleanup → unchanged（规则干净）。
+- optimize 已移植 **20/21** 处理器。
