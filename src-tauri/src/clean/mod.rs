@@ -1553,6 +1553,65 @@ pub fn scan_preview() -> CleanPreview {
         });
     }
 
+    // 外置卷 .TemporaryItems/.Trashes/.DS_Store（对标 clean_external_volume_target）。
+    if let Ok(vols) = std::fs::read_dir("/Volumes") {
+        for vol in vols.flatten() {
+            let vol_path = vol.path();
+            if !vol_path.is_dir() || vol_path.is_symlink() {
+                continue;
+            }
+            // 跳过与 /Applications 同名或系统卷。
+            let name = vol.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || name == "Data" || name == "VM" {
+                continue;
+            }
+            let targets = special::scan_external_volume(&vol_path.to_string_lossy());
+            if targets.is_empty() {
+                continue;
+            }
+            let size: u64 = targets
+                .iter()
+                .map(|p| path_size_with_deadline(p, global_deadline.min(Instant::now() + SIZE_SCAN_DEADLINE)))
+                .sum();
+            let items: Vec<CleanItem> = targets
+                .iter()
+                .map(|p| CleanItem {
+                    path: p.to_string_lossy().to_string(),
+                    size_bytes: 0,
+                    skip_reason: String::new(),
+                })
+                .collect();
+            groups.push(CleanGroup {
+                description: format!("External volume · {name}"),
+                family: "user_essentials".into(),
+                items,
+                total_size_bytes: size,
+                skipped_count: 0,
+            });
+        }
+    }
+
+    // LaunchAgents 提示（对标 show_user_launch_agent_hint_notice；只读）。
+    {
+        let hints = special::launch_agent_hints();
+        let items: Vec<CleanItem> = hints
+            .iter()
+            .map(|(name, reason)| CleanItem {
+                path: format!("~/Library/LaunchAgents/{name}"),
+                size_bytes: 0,
+                skip_reason: reason.clone(),
+            })
+            .collect();
+        let skipped = items.len();
+        groups.push(CleanGroup {
+            description: "LaunchAgents hints".into(),
+            family: "user_essentials".into(),
+            items,
+            total_size_bytes: 0,
+            skipped_count: skipped,
+        });
+    }
+
     let total_size = groups.iter().map(|g| g.total_size_bytes).sum();
     CleanPreview {
         groups,
@@ -1936,6 +1995,53 @@ pub fn execute_clean(selected_groups: &[String], dry_run: bool) -> CleanExecuteR
             status: "skipped".into(),
             size_bytes: 0,
             detail: format!("{} 个 ≥1GB 路径（只读审查）", large.len()),
+        });
+    }
+
+    // 外置卷（对标 clean_external_volume_target）。
+    if let Ok(vols) = std::fs::read_dir("/Volumes") {
+        for vol in vols.flatten() {
+            let vol_path = vol.path();
+            let name = vol.file_name().to_string_lossy().to_string();
+            let group_desc = format!("External volume · {name}");
+            if !selected_groups.iter().any(|s| *s == group_desc) {
+                continue;
+            }
+            if !vol_path.is_dir() || vol_path.is_symlink() {
+                continue;
+            }
+            let targets = special::scan_external_volume(&vol_path.to_string_lossy());
+            let mut removed = 0usize;
+            for p in &targets {
+                let s = p.to_string_lossy().to_string();
+                let outcome = delete::delete_to_trash(&s, dry_run, "clean");
+                match outcome.status.as_str() {
+                    "ok" | "dry-run" => removed += 1,
+                    "failed" => failed_count += 1,
+                    _ => {}
+                }
+                freed_bytes += outcome.size_bytes;
+            }
+            if !dry_run {
+                deleted_count += removed;
+            }
+            outcomes.push(DeleteOutcome {
+                path: group_desc,
+                status: if dry_run { "dry-run" } else { "ok" }.into(),
+                size_bytes: 0,
+                detail: format!("已清理 {removed} 项"),
+            });
+        }
+    }
+
+    // LaunchAgents 提示：只读，不执行。
+    if selected_groups.iter().any(|s| s == "LaunchAgents hints") {
+        let hints = special::launch_agent_hints();
+        outcomes.push(DeleteOutcome {
+            path: "LaunchAgents hints".into(),
+            status: "skipped".into(),
+            size_bytes: 0,
+            detail: format!("{} 个提示（只读）", hints.len()),
         });
     }
 

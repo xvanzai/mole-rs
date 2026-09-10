@@ -1293,3 +1293,24 @@
 ### 测试
 
 - 205 个测试通过；真机冒烟 347 组（原 343）。
+
+---
+
+<a name="clean-external-hints"></a>
+## clean 深度清理：外置卷 + LaunchAgents 提示
+
+### 对标记录
+
+- `clean_external_volume_target`：外置卷 .TemporaryItems/.Trashes + .DS_Store（maxdepth 5）→ Trash。
+- `show_user_launch_agent_hint_notice`：LaunchAgents 中程序目标缺失/不可执行（max 3 条，只读提示）。
+
+### 变更前后对照
+
+| 项 | 原实现 | Rust 实现 | 是否变更 | 原因 |
+|----|--------|----------|---------|------|
+| 外置卷入口 | --volume 参数 | 自动扫描 /Volumes/* | **GUI 适配** | GUI 无 CLI 参数；自动发现外置卷 |
+| LaunchAgents 提示 | MachServices/系统二进制过滤 | 简化为 Program/ProgramArguments + 系统路径过滤 | **简化** | 提示语义一致；MachServices 检查保留 |
+
+### 测试
+
+- 205 个测试通过。

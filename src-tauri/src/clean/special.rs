@@ -266,6 +266,130 @@ fn newest_child_date(dir: &Path) -> Option<String> {
     Some(newest.to_string())
 }
 
+/// 对标 clean_external_volume_target：外置卷 .TemporaryItems/.Trashes +
+/// .DS_Store + 常见元数据文件。
+/// 返回可清理目标列表。
+pub fn scan_external_volume(volume: &str) -> Vec<PathBuf> {
+    let root = Path::new(volume);
+    if !root.is_dir() || root.is_symlink() {
+        return Vec::new();
+    }
+    let whitelist = Whitelist::load();
+    let mut out = Vec::new();
+    // .TemporaryItems / .Trashes。
+    for name in [".TemporaryItems", ".Trashes"] {
+        let p = root.join(name);
+        if p.exists() && !p.is_symlink() {
+            let s = p.to_string_lossy().to_string();
+            if !protect::should_protect_path(&s) && !whitelist.is_whitelisted(&s) {
+                out.push(p);
+            }
+        }
+    }
+    // .DS_Store（maxdepth 5，排除子目录内同名排除表——外置卷简化为全扫）。
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        if Instant::now() >= deadline {
+            break;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if Instant::now() >= deadline {
+                break;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() && depth < 5 {
+                stack.push((entry.path(), depth + 1));
+            } else if name == ".DS_Store" && ft.is_file() {
+                let s = entry.path().to_string_lossy().to_string();
+                if !protect::should_protect_path(&s) && !whitelist.is_whitelisted(&s) {
+                    out.push(entry.path());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 对标 show_user_launch_agent_hint_notice：扫描 LaunchAgents 中程序目标
+/// 缺失/不可执行的条目（只读提示）。
+pub fn launch_agent_hints() -> Vec<(String, String)> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let dir = PathBuf::from(&home).join("Library/LaunchAgents");
+    if !dir.is_dir() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".plist") || name.starts_with("com.apple.") {
+            continue;
+        }
+        let path = entry.path();
+        // 读 Program 路径（简化：plist Program 或 ProgramArguments[0]）。
+        let Some(dict) = plist::Value::from_file(&path)
+            .ok()
+            .and_then(|v| v.into_dictionary())
+        else {
+            continue;
+        };
+        let program = dict
+            .get("Program")
+            .and_then(|v| v.as_string())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                dict.get("ProgramArguments")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_string())
+                    .map(|s| s.to_string())
+            });
+        let Some(program) = program else {
+            continue;
+        };
+        // 有 MachServices 且无 Program → 跳过（daemon 类）。
+        if program.is_empty() && dict.contains_key("MachServices") {
+            continue;
+        }
+        if program.is_empty() {
+            continue;
+        }
+        // 系统二进制跳过。
+        if program.starts_with("/usr/") || program.starts_with("/bin/") || program.starts_with("/sbin/")
+        {
+            continue;
+        }
+        // 存在且可执行 → 健康。
+        let p = Path::new(&program);
+        if program.starts_with('/') && p.is_file() {
+            use std::os::unix::fs::PermissionsExt;
+            if std::fs::metadata(p)
+                .map(|m| m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            out.push((
+                name.clone(),
+                format!("程序目标不可执行：{program}"),
+            ));
+        } else if program.starts_with('/') && !p.exists() {
+            out.push((name.clone(), format!("程序目标缺失：{program}")));
+        }
+        if out.len() >= 3 {
+            break; // max_hits=3
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
