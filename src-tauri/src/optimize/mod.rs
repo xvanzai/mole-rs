@@ -70,6 +70,9 @@ pub fn task_catalog() -> Vec<OptimizeTask> {
                     | "coreduet_cleanup"
                     | "notification_cleanup"
                     | "fix_broken_configs"
+                    | "system_maintenance"
+                    | "network_optimization"
+                    | "launch_services_rebuild"
             ),
         })
         .collect()
@@ -128,15 +131,105 @@ fn record(outcomes: &mut Vec<TaskResult>, action: &str, outcome: Outcome, detail
     });
 }
 
+/// 对标 `optimize_task_result_from_counts`：失败>0→Failed，applied>0→
+/// Applied，skipped>0→Skipped，否则 Unchanged。
+fn outcome_from_counts(applied: usize, failed: usize, skipped: usize) -> Outcome {
+    if failed > 0 {
+        Outcome::Failed
+    } else if applied > 0 {
+        Outcome::Applied
+    } else if skipped > 0 {
+        Outcome::Skipped
+    } else {
+        Outcome::Unchanged
+    }
+}
+
+/// 对标 `optimize_sudo_available`：dry-run 视为可用；真实执行仅接受
+/// 已缓存的非交互 sudo（`sudo -n true`），不弹密码框——GUI 约束，
+/// 见 CHANGES.md（原 CLI 经 ensure_sudo_session 交互获取会话）。
+fn optimize_sudo_available(dry_run: bool) -> bool {
+    if dry_run {
+        return true;
+    }
+    probe_exit_code("sudo", &["-n", "true"], Duration::from_secs(3)) == Some(0)
+}
+
+/// 对标 `flush_dns_cache`：dry-run 直接成功（并置 MOLE_DNS_FLUSHED 语义）；
+/// 真实：sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder。
+fn flush_dns_cache(dry_run: bool) -> bool {
+    if dry_run {
+        return true;
+    }
+    if !optimize_sudo_available(false) {
+        return false;
+    }
+    crate::status::run_cmd(
+        "sudo",
+        &["dscacheutil", "-flushcache"],
+        Duration::from_secs(5),
+    )
+    .is_ok()
+        && crate::status::run_cmd(
+            "sudo",
+            &["killall", "-HUP", "mDNSResponder"],
+            Duration::from_secs(5),
+        )
+        .is_ok()
+}
+
+/// 对标 `get_lsregister_path`：两个候选路径，可执行则返回。
+fn get_lsregister_path() -> Option<String> {
+    if let Ok(p) = std::env::var("MOLE_LSREGISTER_PATH") {
+        return Some(p);
+    }
+    for candidate in [
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
+        "/System/Library/CoreServices/Frameworks/LaunchServices.framework/Support/lsregister",
+    ] {
+        let path = Path::new(candidate);
+        if path.is_file() && is_executable(path) {
+            return Some(candidate.to_string());
+        }
+    }
+    None
+}
+
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
 /// 执行选中的优化任务（未移植任务记录 unavailable）。
+///
+/// `dns_flushed` 对标 `MOLE_DNS_FLUSHED`：system_maintenance 刷新成功后
+/// network_optimization 直接 Unchanged，避免同一轮执行重复刷 DNS。
 pub fn execute(selected: &[String], dry_run: bool) -> OptimizeResult {
     let mut outcomes: Vec<TaskResult> = Vec::new();
+    let mut dns_flushed = false;
 
     for task in task_catalog() {
         if !selected.iter().any(|s| s == task.action) {
             continue;
         }
         match task.action {
+            "system_maintenance" => {
+                let (outcome, detail, flushed) = system_maintenance(dry_run);
+                if flushed {
+                    dns_flushed = true;
+                }
+                record(&mut outcomes, task.action, outcome, &detail);
+            }
+            "network_optimization" => {
+                let (outcome, detail) = network_optimization(dry_run, dns_flushed);
+                record(&mut outcomes, task.action, outcome, &detail);
+            }
+            "launch_services_rebuild" => {
+                let (outcome, detail) = launch_services_rebuild(dry_run);
+                record(&mut outcomes, task.action, outcome, &detail);
+            }
             "saved_state_cleanup" => {
                 let (outcome, detail) = saved_state_cleanup(dry_run);
                 record(&mut outcomes, task.action, outcome, &detail);
@@ -1020,6 +1113,104 @@ fn quarantine_cleanup(dry_run: bool) -> (Outcome, String) {
     }
 }
 
+/// 对标 `opt_system_maintenance`：刷 DNS 缓存 + mdutil -s / 校验 Spotlight。
+/// 返回 (outcome, detail, dns_flushed)——dns_flushed 供同轮 network_optimization
+/// 复用（对标 MOLE_DNS_FLUSHED）。
+fn system_maintenance(dry_run: bool) -> (Outcome, String, bool) {
+    if !dry_run && !optimize_sudo_available(false) {
+        return (
+            Outcome::Skipped,
+            "需要管理员权限（sudo 缓存不可用）".into(),
+            false,
+        );
+    }
+
+    let dns_flushed = flush_dns_cache(dry_run);
+
+    let mut spotlight_failed = false;
+    match crate::status::run_cmd("mdutil", &["-s", "/"], Duration::from_secs(3)) {
+        Ok(status) => {
+            if status.to_lowercase().contains("indexing disabled") {
+                // Spotlight 索引被禁用：记录但不计失败（对标）。
+            }
+            // 否则视为已校验成功。
+        }
+        Err(_) => spotlight_failed = true,
+    }
+
+    let applied = if dns_flushed { 1 } else { 0 };
+    let failed = if dns_flushed { 0 } else { 1 } + usize::from(spotlight_failed);
+    let detail = if dns_flushed && !spotlight_failed {
+        "DNS 缓存已刷新，Spotlight 索引已校验".to_string()
+    } else if dns_flushed {
+        "DNS 缓存已刷新，但 Spotlight 校验失败".to_string()
+    } else if spotlight_failed {
+        "DNS 刷新失败，Spotlight 校验失败".to_string()
+    } else {
+        "DNS 刷新失败".to_string()
+    };
+    (outcome_from_counts(applied, failed, 0), detail, dns_flushed)
+}
+
+/// 对标 `opt_network_optimization`：DNS 缓存刷新（与 system_maintenance
+/// 共享 flush_dns_cache；同轮已刷则 Unchanged）。
+fn network_optimization(dry_run: bool, dns_flushed_this_run: bool) -> (Outcome, String) {
+    if dns_flushed_this_run {
+        return (
+            Outcome::Unchanged,
+            "DNS 缓存本轮已刷新（由 system_maintenance 完成）".into(),
+        );
+    }
+    if !dry_run && !optimize_sudo_available(false) {
+        return (
+            Outcome::Skipped,
+            "需要管理员权限（sudo 缓存不可用）".into(),
+        );
+    }
+    if flush_dns_cache(dry_run) {
+        (Outcome::Applied, "DNS 缓存与 mDNSResponder 已刷新".into())
+    } else {
+        (Outcome::Failed, "DNS 缓存刷新失败".into())
+    }
+}
+
+/// 对标 `opt_launch_services_rebuild`：lsregister -gc 清理 + 三域强制重建
+/// （失败回退 local+user 两域）。
+fn launch_services_rebuild(dry_run: bool) -> (Outcome, String) {
+    let Some(lsregister) = get_lsregister_path() else {
+        return (Outcome::Unavailable, "lsregister 未找到".into());
+    };
+    if dry_run {
+        return (Outcome::Applied, "将重建 LaunchServices 数据库".into());
+    }
+
+    // -gc 清理（失败不阻断，对标 `|| true`）。
+    let _ = std::process::Command::new(&lsregister)
+        .arg("-gc")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    // 三域强制重建；失败回退 local+user。
+    let rebuild = |args: &[&str]| -> bool {
+        std::process::Command::new(&lsregister)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    let success = rebuild(&["-r", "-f", "-domain", "local", "-domain", "user", "-domain", "system"])
+        || rebuild(&["-r", "-f", "-domain", "local", "-domain", "user"]);
+
+    if success {
+        (Outcome::Applied, "LaunchServices 已重建，文件关联已刷新".into())
+    } else {
+        (Outcome::Failed, "LaunchServices 重建失败".into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1059,6 +1250,9 @@ mod tests {
                     | "coreduet_cleanup"
                     | "notification_cleanup"
                     | "fix_broken_configs"
+                    | "system_maintenance"
+                    | "network_optimization"
+                    | "launch_services_rebuild"
             );
             assert_eq!(t.implemented, implemented, "{} 标记不一致", t.action);
         }
@@ -1067,14 +1261,14 @@ mod tests {
     /// 执行框架：未移植任务记录 unavailable。
     #[test]
     fn unimplemented_task_unavailable() {
-        let r = execute(&["network_optimization".to_string()], true);
+        let r = execute(&["network_stack_optimize".to_string()], true);
         assert_eq!(r.results.len(), 1);
         assert_eq!(r.results[0].outcome, "unavailable");
         assert_eq!(r.unavailable, 1);
     }
 }
 
-/// 真机冒烟（默认忽略）：dry-run 执行 saved_state_cleanup。
+/// 真机冒烟（默认忽略）：dry-run 执行已移植优化任务。
 #[cfg(test)]
 mod smoke_tests {
     #[test]
@@ -1091,6 +1285,9 @@ mod smoke_tests {
             "coreduet_cleanup".to_string(),
             "notification_cleanup".to_string(),
             "fix_broken_configs".to_string(),
+            "system_maintenance".to_string(),
+            "network_optimization".to_string(),
+            "launch_services_rebuild".to_string(),
         ], true);
         for res in &r.results {
             println!("[{}] {} ({})", res.outcome, res.action, res.detail);
@@ -1173,5 +1370,63 @@ mod launch_agent_tests {
         assert!(is_broken_agent(&fallback));
 
         std::fs::remove_dir_all(&tmp).ok();
+    }
+}
+
+#[cfg(test)]
+mod network_launch_tests {
+    use super::*;
+
+    /// 对标 optimize_task_result_from_counts 的六态映射。
+    #[test]
+    fn outcome_from_counts_semantics() {
+        assert_eq!(outcome_from_counts(0, 1, 0), Outcome::Failed);
+        assert_eq!(outcome_from_counts(2, 1, 0), Outcome::Failed);
+        assert_eq!(outcome_from_counts(1, 0, 0), Outcome::Applied);
+        assert_eq!(outcome_from_counts(0, 0, 1), Outcome::Skipped);
+        assert_eq!(outcome_from_counts(0, 0, 0), Outcome::Unchanged);
+    }
+
+    /// dry-run 下 sudo 会话视为可用（对标 MOLE_OPTIMIZE_SUDO_AVAILABLE）。
+    #[test]
+    fn sudo_available_dry_run() {
+        assert!(optimize_sudo_available(true));
+        assert!(flush_dns_cache(true));
+    }
+
+    /// MOLE_LSREGISTER_PATH 覆盖优先；未设置时返回存在的候选或 None。
+    #[test]
+    fn lsregister_path_resolution() {
+        // 本机应能通过默认候选找到（macOS）。
+        let path = get_lsregister_path();
+        if let Ok(p) = std::env::var("MOLE_LSREGISTER_PATH") {
+            assert_eq!(path.as_deref(), Some(p.as_str()));
+        } else if let Some(p) = path {
+            assert!(Path::new(&p).is_file(), "lsregister 应存在: {p}");
+            assert!(is_executable(Path::new(&p)));
+        }
+        // 不存在的覆盖路径：get_lsregister_path 在 env 设置时直接返回，
+        // 不检查存在性——与原实现 echo "$MOLE_LSREGISTER_PATH" 一致。
+        unsafe { std::env::set_var("MOLE_LSREGISTER_PATH", "/nonexistent/lsregister") };
+        assert_eq!(get_lsregister_path().as_deref(), Some("/nonexistent/lsregister"));
+        unsafe { std::env::remove_var("MOLE_LSREGISTER_PATH") };
+    }
+
+    /// network_optimization：本轮已刷 DNS → Unchanged。
+    #[test]
+    fn network_optimization_dedup() {
+        let (outcome, _) = network_optimization(false, true);
+        assert_eq!(outcome, Outcome::Unchanged);
+    }
+
+    /// system_maintenance dry-run：dns_flushed=true，outcome 非 Failed
+    /// （mdutil 在真机存在；CI 无 mdutil 时可能 failed——仅断言 flushed 标记）。
+    #[test]
+    fn system_maintenance_dry_run_dns_flag() {
+        if !crate::clean::command_exists("mdutil") && !cfg!(target_os = "macos") {
+            return;
+        }
+        let (_, _, flushed) = system_maintenance(true);
+        assert!(flushed, "dry-run 下 flush_dns_cache 必为 true");
     }
 }

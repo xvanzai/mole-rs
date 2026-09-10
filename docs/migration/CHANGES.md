@@ -656,3 +656,28 @@
 
 - 126 个测试通过；真机 dry-run：本机 Preferences 全部有效 → Unchanged。
 - optimize 已移植 **10/21** 处理器。
+
+---
+
+<a name="optimize-7h"></a>
+## optimize 优化维护（模块7第八片：system_maintenance + network_optimization + launch_services_rebuild）
+
+### 对标记录
+
+- `opt_system_maintenance` 1:1：非 dry-run 且无 sudo 会话 → Skipped；`flush_dns_cache`；`mdutil -s /` 三态（失败 → 计入 failed；"Indexing disabled" 仅提示；其余视为已校验）；`optimize_task_result_from_counts(applied, failed)`。
+- `opt_network_optimization` 1:1：同轮已刷 DNS（`MOLE_DNS_FLUSHED`）→ Unchanged；无 sudo → Skipped；`flush_dns_cache` 成功 → Applied / 失败 → Failed。
+- `opt_launch_services_rebuild` 1:1：`get_lsregister_path` 两候选 → 无则 Unavailable；dry-run → Applied；真实：`lsregister -gc`（失败不阻断）→ 三域 `-r -f` → 失败回退 local+user。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| sudo 会话 | `ensure_sudo_session` 交互获取（TTY/Touch ID/osascript 密码框），`MOLE_OPTIMIZE_SUDO_AVAILABLE` 全局 | dry-run 视为可用；真实仅接受 `sudo -n true`（密码缓存），不弹框 | **GUI 适配** | Tauri 命令在阻塞线程池执行，不能阻塞在密码对话框；无缓存时 Skipped 与原"拒绝授权"分支语义一致 |
+| MOLE_DNS_FLUSHED | 环境变量跨任务 | `execute` 内 `dns_flushed: bool` 穿透 system_maintenance → network_optimization | 无行为变更 | 同一轮执行内的去重语义一致 |
+| lsregister 调用 | 子进程 + 超时包装 | `std::process::Command` 无硬超时（对标原实现无 run_with_timeout） | 无行为变更 | lsregister 重建时长不可预测，原实现同样不设上限 |
+
+### 测试
+
+- 131 个测试通过（新增：counts 映射、dry-run sudo 语义、lsregister 路径解析、network_optimization 去重）。
+- 真机 dry-run 冒烟：system_maintenance → applied（DNS+Spotlight 校验）；network_optimization → unchanged（本轮已刷）；launch_services_rebuild → applied（将重建）。
+- optimize 已移植 **13/21** 处理器。
