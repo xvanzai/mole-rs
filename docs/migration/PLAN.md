@@ -22,10 +22,10 @@
 |---|------|-----------|----------|-----|------|
 | 1 | core 工具层（字节单位等） | `internal/units/bytes.go` | `src-tauri/src/core/units.rs` | — | ✅ 已完成 |
 | 2 | status 系统监控 | `cmd/status/*.go` | `src-tauri/src/status/` + `src/pages/StatusPage.vue` | 监控仪表盘 | ✅ GPU/蓝牙/磁盘IO/APFS 修正均已完成；ProcessWatch 告警暂缓 |
-| 3 | clean 深度清理 | `bin/clean.sh`、`lib/clean/*`、`lib/core/app_protection*.sh` | `src-tauri/src/clean/` + `src/pages/CleanPage.vue` | 清理页（预览→执行） | 🟢 3a–3h 完成（白名单、保护层、Trash、动态探测、进程守卫、浏览器、cargo、Apple Silicon/虚拟化/App Support、Service Worker、Cloud&Office、用户基础、浏览器旧版本、Group Containers、owner 命令、deep_system、Mail 龄、incomplete downloads、Deno root）；剩余：Android/JetBrains/数据库族、macOS 安装器、GPU 缓存/本地快照 |
+| 3 | clean 深度清理 | `bin/clean.sh`、`lib/clean/*`、`lib/core/app_protection*.sh` | `src-tauri/src/clean/` + `src/pages/CleanPage.vue` | 清理页（预览→执行） | ✅ 3a–3i 完成（白名单、保护层、Trash、动态探测、进程守卫、浏览器、cargo、Apple Silicon/虚拟化/App Support、Service Worker、Cloud&Office、用户基础、浏览器旧版本、Group Containers、owner 命令、deep_system、Mail 龄、incomplete downloads、Deno root、数据库/API/JetBrains/Composer、Gradle、Xcode 文档、Metal GPU、macOS 安装器） |
 | 4 | purge 项目构建产物清理 | `bin/purge.sh`、`lib/clean/project.sh` | `src-tauri/src/purge/` + `src/pages/PurgePage.vue` | 项目清理页 | ✅ 扫描 + dry-run + Trash 执行 |
-| 5 | analyze 磁盘分析 | `cmd/analyze/*.go` | `src-tauri/src/analyze/` + `src/pages/AnalyzePage.vue` | 磁盘浏览页 | ✅ 扫描+缓存层+洞察条目+本地快照计数；Spotlight 预热暂缓 |
-| 6 | uninstall 应用卸载 | `bin/uninstall.sh` + `lib/uninstall/*` | `src-tauri/src/uninstall/` + `src/pages/UninstallPage.vue` | 卸载页 | 🟢 6a+6b+6c 完成（清单+保护分级+本体+精确残留删除+名称变体） |
+| 5 | analyze 磁盘分析 | `cmd/analyze/*.go` | `src-tauri/src/analyze/` + `src/pages/AnalyzePage.vue` | 磁盘浏览页 | ✅ 扫描+缓存层+洞察条目+本地快照计数；Spotlight 预热（live_scan 深度集成）暂缓 |
+| 6 | uninstall 应用卸载 | `bin/uninstall.sh` + `lib/uninstall/*` | `src-tauri/src/uninstall/` + `src/pages/UninstallPage.vue` | 卸载页 | ✅ 6a–6d + brew/steam + bundle leaf + 系统级 LaunchAgents/Helpers/Receipts |
 | 7 | optimize 优化维护 | `bin/optimize.sh` + `lib/optimize/*` | `src-tauri/src/optimize/` + `src/pages/OptimizePage.vue` | 优化页 | ✅ 21/21 处理器完成（login_items_audit 需 TCC 自动化授权） |
 | 8 | history / manage（更新、白名单、自移除） | `bin/history.sh` + `lib/core/history.sh` + `lib/manage/*` | `src-tauri/src/history.rs` + `src/pages/HistoryPage.vue` | 历史页 / 设置页 | ✅ 8a 历史 + 8b 设置页（白名单/purge_paths 管理） |
 
