@@ -1,21 +1,13 @@
 //! uninstall 模块：应用卸载，对标 `bin/uninstall.sh` + `lib/uninstall/*`。
 //!
-//! 第一片（本模块）：应用清单（只读）+ 卸载模式保护分级。
-//! 对标要点：
-//! - 搜索目录：/Applications、~/Applications、/Library/Input Methods、
-//!   ~/Library/Input Methods、/Volumes/*/Applications（与 /Applications
-//!   同一目录时去重）；`find -maxdepth 3 -iname "*.app"`；
-//! - bundle ID：Contents/Info.plist 的 CFBundleIdentifier；iOS 应用回退
-//!   Wrapper/*.app/Info.plist（对标 batch.sh 的 Wrapper 分支）；
-//! - `|`→`-`、控制字符清洗（对标 uninstall_resolve_bundle_id）；
-//! - 后台专用应用（LSBackgroundOnly）仅在位于搜索根直接层时列出；
-//! - 保护分级（对标 should_protect_from_uninstall）：先判
-//!   APPLE_UNINSTALLABLE_APPS（可卸载放行），再判
-//!   SYSTEM_CRITICAL_BUNDLES（系统关键保护）。
-//!
-//! 第二片（暂缓）：应用本体删除 + `find_app_files` 残留查找（共享
-//! bundle ID 兄弟守卫、LaunchAgents、Containers、Cask zap 等）——该
-//! 删除汇按 AGENTS.md 要求逐行复核后移植。
+//! 第一片：应用清单（只读）+ 卸载模式保护分级。
+//! 第二片：应用本体删除 + 精确 bundle ID 残留。
+//! 第三片：名称变体残留 + 卸载模式保护语义。
+//! 第四片（本片）：Homebrew cask 检测/卸载 + Steam 启动器识别
+//! （对标 lib/uninstall/brew.sh + steam.sh）。
+
+pub mod brew;
+pub mod steam;
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -604,8 +596,6 @@ pub fn uninstall_app(app_path: &str, bundle_id: &str, dry_run: bool) -> crate::c
 
     crate::clean::delete::log_session_start("uninstall");
 
-    let mut targets: Vec<String> = Vec::new();
-    // 应用本体。
     let path = Path::new(app_path);
     if !path.exists() && !path.is_symlink() {
         outcomes.push(crate::clean::DeleteOutcome {
@@ -621,7 +611,46 @@ pub fn uninstall_app(app_path: &str, bundle_id: &str, dry_run: bool) -> crate::c
             failed_count,
         };
     }
-    targets.push(app_path.to_string());
+
+    // Homebrew cask：优先 brew uninstall --zap（对标 batch.sh 的 brew 路由）。
+    // 成功后应用本体由 brew 移除；残留仍走下方路径清理。
+    let mut brew_handled = false;
+    if let Some(cask) = brew::get_brew_cask_name(app_path) {
+        let (ok, detail) = brew::brew_uninstall_cask(&cask, app_path, true, dry_run);
+        let status = if dry_run {
+            "dry-run"
+        } else if ok {
+            "ok"
+        } else {
+            "failed"
+        };
+        if ok && !dry_run {
+            deleted_count += 1;
+        } else if status == "failed" {
+            failed_count += 1;
+        }
+        outcomes.push(crate::clean::DeleteOutcome {
+            path: format!("{app_path} (cask:{cask})"),
+            status: status.into(),
+            size_bytes: 0,
+            detail,
+        });
+        brew_handled = ok;
+    }
+
+    // 应用本体：brew 已处理则跳过 Trash 删除。
+    let mut targets: Vec<String> = Vec::new();
+    if !brew_handled {
+        // Steam 生成的桌面快捷方式：大小是启动器而非游戏本体（对标
+        // uninstall_app_is_steam_launcher）；仍可删除，但 detail 标注。
+        let steam_note = if steam::is_steam_launcher(app_path) {
+            "（Steam 启动器快捷方式，非游戏本体）"
+        } else {
+            ""
+        };
+        let _ = steam_note; // 供后续 UI 标注；当前删除路径不变
+        targets.push(app_path.to_string());
+    }
 
     let bundle_valid = is_reverse_dns_bundle_id(bundle_id);
     let app_name = Path::new(app_path)

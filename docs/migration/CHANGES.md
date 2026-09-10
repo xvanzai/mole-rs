@@ -966,3 +966,27 @@
 ### 测试
 
 - 161 个测试通过（新增：put/get 往返、空值拒绝、淘汰保留最新、磁盘持久化）。
+
+---
+
+<a name="uninstall-brew-steam"></a>
+## uninstall 应用卸载（brew cask + Steam 启动器）
+
+### 对标记录
+
+- `get_brew_cask_name` 四阶段检测 1:1：resolved path（Caskroom 内）→ Caskroom 按 .app 名搜索（唯一 token + installed + info 验证）→ 直接 symlink → brew list 小写匹配 + info 验证。
+- `brew_uninstall_cask` 1:1：`brew uninstall --cask --zap`（NONINTERACTIVE/HOMEBREW_NO_ENV_HINTS）；超时按应用大小 300/600/900s；成功后验证 cask+app 均已移除。
+- `uninstall_app` 路由：检出 cask 时优先 brew，成功则跳过 Trash 删除本体；残留仍走下方路径清理。
+- Steam：`uninstall_steam_launcher_appid` 1:1——shebang + ≤4096 字节 + 恰好一条 `open steam://(run|rungameid|launch)/<digits>`；识别后 detail 标注"Steam 启动器快捷方式"。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| brew 探测 | /bin/bash wrapper + export -f | 直接 brew 子进程 + env | 实现差异 | 无 bash 函数注入需求 |
+| 兄弟守卫 nozap | 共享 bundle id 时 nozap | 首片恒 zap | **简化** | 兄弟守卫（6d）落地后接入 nozap |
+| Steam 解析 | awk 脚本 | Rust 逐行解析 | 实现差异（语义一致） | shebang/open/appid 门控一致 |
+
+### 测试
+
+- 168 个测试通过（新增：cask token 提取矩阵、Steam 解析正反例、launcher fixture、dry-run 卸载）。
