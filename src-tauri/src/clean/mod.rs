@@ -18,6 +18,7 @@
 mod catalog;
 mod probe;
 pub(crate) mod delete;
+pub(crate) mod process;
 pub(crate) mod protect;
 pub(crate) mod protect_data;
 pub(crate) mod whitelist;
@@ -229,11 +230,14 @@ fn skip_reason(path: &str, whitelist: &whitelist::Whitelist) -> Option<&'static 
     None
 }
 
-/// 统一扫描条目：静态目录行 + 动态探测行。
+/// 统一扫描条目：静态目录行 + 动态探测行 + 进程守卫行。
 struct ScanEntry {
     family: &'static str,
     pattern: PathBuf,
     description: String,
+    /// 进程守卫探针（对标 mole_clean_process_guard 三态）：
+    /// Running/Unknown 时整组以 skip_reason 拒绝，不进入删除 sink。
+    process_probe: Option<fn() -> process::ProcessState>,
 }
 
 /// 动态探测行（对标 dev.sh 中经 owner 命令解析路径后 safe_clean 的行）。
@@ -261,6 +265,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
             family: "dev_frontend",
             pattern: npm_default.join(sub),
             description: desc.to_string(),
+            process_probe: None,
         });
     }
     if npm_custom {
@@ -273,6 +278,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
                     family: "dev_frontend",
                     pattern: npm_cache_path.join(sub),
                     description: format!("{desc} (custom path)"),
+                    process_probe: None,
                 });
             }
         }
@@ -284,6 +290,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
             family: "dev_python",
             pattern: probe::uv_default_cache_path().join("*"),
             description: "uv cache".into(),
+            process_probe: None,
         });
     }
 
@@ -294,6 +301,7 @@ fn dynamic_entries() -> Vec<ScanEntry> {
                 family: "dev_frontend",
                 pattern: corepack_path.join("*"),
                 description: "Corepack cache".into(),
+                process_probe: None,
             });
         }
     }
@@ -303,12 +311,229 @@ fn dynamic_entries() -> Vec<ScanEntry> {
         family: "dev_cloud",
         pattern: probe::mise_cache_path().join("*"),
         description: "mise cache".into(),
+        process_probe: None,
     });
+
+    // Cargo registry/cache（对标 clean_dev_rust）：owner 进程守卫 +
+    // 物理包含校验（cache 根不得逃出 CARGO_HOME）。
+    if let Some(entry) = cargo_registry_entry() {
+        rows.push(entry);
+    }
 
     rows
 }
 
-/// 汇总静态目录与动态探测行。
+/// 对标 clean_dev_rust 的 cargo registry/cache 行：
+/// - rust_build_process_state 三态守卫（Running → 延迟；Unknown → 拒绝）；
+/// - cache 根物理路径必须仍在 CARGO_HOME 内（对标 rust_cache_root_physical_path）。
+fn cargo_registry_entry() -> Option<ScanEntry> {
+    let cargo_home = probe::resolve_tool_home("CARGO_HOME", ".cargo");
+    let cache_root = cargo_home.join("registry/cache");
+    if !cache_root.is_dir() {
+        return None;
+    }
+    // 物理包含：cache 的 canonical 必须在 cargo_home 的 canonical 下。
+    if let (Ok(home_real), Ok(cache_real)) =
+        (cargo_home.canonicalize(), cache_root.canonicalize())
+    {
+        if !cache_real.starts_with(&home_real) || home_real == Path::new("/") {
+            return None; // 逃出 CARGO_HOME → 不清理（对标 stopped）
+        }
+    } else {
+        return None;
+    }
+    Some(ScanEntry {
+        family: "dev_rust",
+        pattern: cache_root.join("*"),
+        description: "Rust cargo cache".into(),
+        process_probe: Some(process::rust_build_process_state),
+    })
+}
+
+/// 浏览器进程守卫行（对标 clean_browsers 中带 pgrep 守卫的档案缓存）。
+fn guarded_browser_entries() -> Vec<ScanEntry> {
+    let mut rows = Vec::new();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let chrome = format!("{home}/Library/Application Support/Google/Chrome");
+    if Path::new(&chrome).is_dir() {
+        // 描述唯一化：profile 层与根层同名缓存在 GUI 中需可区分选择
+        // （对标原多行 safe_clean；GUI 按 description 选组）。
+        let chrome_rows: &[(&str, &str)] = &[
+            ("*/Application Cache/*", "Chrome app cache"),
+            ("*/Code Cache/*", "Chrome code cache"),
+            ("*/GPUCache/*", "Chrome GPU cache"),
+            ("*/DawnCache/*", "Chrome Dawn cache"),
+            ("*/GrShaderCache/*", "Chrome profile GR shader cache"),
+            ("*/GraphiteDawnCache/*", "Chrome profile Graphite Dawn cache"),
+            ("component_crx_cache/*", "Chrome component CRX cache"),
+            ("ShaderCache/*", "Chrome shader cache"),
+            ("GrShaderCache/*", "Chrome GR shader cache"),
+            ("GraphiteDawnCache/*", "Chrome Dawn cache"),
+            ("Crashpad/completed/*", "Chrome crash reports"),
+            ("OptGuideOnDeviceModel/*", "Chrome on-device model cache"),
+            ("OptGuideOnDeviceClassifierModel/*", "Chrome on-device classifier cache"),
+            ("optimization_guide_model_store/*", "Chrome optimization guide models"),
+        ];
+        for (sub, desc) in chrome_rows {
+            rows.push(ScanEntry {
+                family: "browser",
+                pattern: PathBuf::from(&chrome).join(sub),
+                description: desc.to_string(),
+                process_probe: Some(process::google_chrome_process_state),
+            });
+        }
+    }
+
+    // Firefox。
+    if Path::new(&home).join("Library/Application Support/Firefox").is_dir() {
+        rows.push(ScanEntry {
+            family: "browser",
+            pattern: PathBuf::from(&home).join("Library/Caches/Firefox/*"),
+            description: "Firefox cache".into(),
+            process_probe: Some(process::firefox_process_state),
+        });
+        rows.push(ScanEntry {
+            family: "browser",
+            pattern: PathBuf::from(&home)
+                .join("Library/Application Support/Firefox/Profiles/*/cache2/*"),
+            description: "Firefox profile cache".into(),
+            process_probe: Some(process::firefox_process_state),
+        });
+    }
+
+    // Arc 档案缓存（对标 Arc 未运行分支；GUI 按描述选择，故描述必须唯一）。
+    let arc = PathBuf::from(&home).join("Library/Application Support/Arc");
+    if arc.is_dir() {
+        let arc_rows: &[(&str, &str)] = &[
+            ("*/Code Cache/*", "Arc profile code cache"),
+            ("*/GPUCache/*", "Arc profile GPU cache"),
+            ("*/DawnCache/*", "Arc profile Dawn cache"),
+            ("*/GrShaderCache/*", "Arc profile GR shader cache"),
+            ("*/GraphiteDawnCache/*", "Arc profile Graphite Dawn cache"),
+            ("ShaderCache/*", "Arc shader cache"),
+            ("GrShaderCache/*", "Arc GR shader cache"),
+            ("GraphiteDawnCache/*", "Arc Dawn cache"),
+            ("Crashpad/completed/*", "Arc crash reports"),
+            ("User Data/*/Code Cache/*", "Arc User Data code cache"),
+            ("User Data/*/GPUCache/*", "Arc User Data GPU cache"),
+            ("User Data/*/DawnCache/*", "Arc User Data Dawn cache"),
+            ("User Data/*/GrShaderCache/*", "Arc User Data GR shader cache"),
+            ("User Data/*/GraphiteDawnCache/*", "Arc User Data Graphite Dawn cache"),
+            ("User Data/ShaderCache/*", "Arc User Data shader cache"),
+            ("User Data/GrShaderCache/*", "Arc User Data GR shader cache"),
+            ("User Data/GraphiteDawnCache/*", "Arc User Data Dawn cache"),
+            ("User Data/component_crx_cache/*", "Arc component CRX cache"),
+            ("User Data/extensions_crx_cache/*", "Arc extensions CRX cache"),
+            ("User Data/Crashpad/completed/*", "Arc User Data crash reports"),
+        ];
+        for (sub, desc) in arc_rows {
+            rows.push(ScanEntry {
+                family: "browser",
+                pattern: arc.join(sub),
+                description: desc.to_string(),
+                process_probe: Some(process::arc_process_state),
+            });
+        }
+    }
+
+    // Brave。
+    let brave = PathBuf::from(&home).join("Library/Application Support/BraveSoftware/Brave-Browser");
+    if brave.is_dir() {
+        let brave_rows: &[(&str, &str)] = &[
+            ("*/Application Cache/*", "Brave app cache"),
+            ("*/Code Cache/*", "Brave code cache"),
+            ("*/GPUCache/*", "Brave GPU cache"),
+            ("*/DawnCache/*", "Brave Dawn cache"),
+            ("*/GrShaderCache/*", "Brave profile GR shader cache"),
+            ("*/GraphiteDawnCache/*", "Brave profile Graphite Dawn cache"),
+            ("component_crx_cache/*", "Brave component CRX cache"),
+            ("ShaderCache/*", "Brave shader cache"),
+            ("GrShaderCache/*", "Brave GR shader cache"),
+            ("GraphiteDawnCache/*", "Brave Dawn cache"),
+            ("Crashpad/completed/*", "Brave crash reports"),
+        ];
+        for (sub, desc) in brave_rows {
+            rows.push(ScanEntry {
+                family: "browser",
+                pattern: brave.join(sub),
+                description: desc.to_string(),
+                process_probe: Some(process::brave_process_state),
+            });
+        }
+    }
+
+    // Dia（仅 Application Support 侧有守卫；缓存目录见静态行）。
+    let dia = PathBuf::from(&home).join("Library/Application Support/Dia");
+    if dia.is_dir() {
+        let dia_rows: &[(&str, &str)] = &[
+            ("User Data/GraphiteDawnCache/*", "Dia Graphite Dawn cache"),
+            ("User Data/GPUPersistentCache/*", "Dia GPU cache"),
+            ("User Data/component_crx_cache/*", "Dia component CRX cache"),
+            ("User Data/extensions_crx_cache/*", "Dia extensions CRX cache"),
+            ("User Data/*/DawnGraphiteCache/*", "Dia Dawn Graphite cache"),
+            ("User Data/*/DawnWebGPUCache/*", "Dia Dawn WebGPU cache"),
+            ("User Data/*/GPUCache/*", "Dia profile GPU cache"),
+        ];
+        for (sub, desc) in dia_rows {
+            rows.push(ScanEntry {
+                family: "browser",
+                pattern: dia.join(sub),
+                description: desc.to_string(),
+                process_probe: Some(process::dia_process_state),
+            });
+        }
+    }
+
+    // Vivaldi。
+    let vivaldi = PathBuf::from(&home).join("Library/Application Support/Vivaldi");
+    if vivaldi.is_dir() {
+        let vivaldi_rows: &[(&str, &str)] = &[
+            ("*/Code Cache/*", "Vivaldi code cache"),
+            ("*/GPUCache/*", "Vivaldi GPU cache"),
+            ("*/DawnCache/*", "Vivaldi Dawn cache"),
+            ("*/GrShaderCache/*", "Vivaldi profile GR shader cache"),
+            ("*/GraphiteDawnCache/*", "Vivaldi profile Graphite Dawn cache"),
+            ("ShaderCache/*", "Vivaldi shader cache"),
+            ("GrShaderCache/*", "Vivaldi GR shader cache"),
+            ("GraphiteDawnCache/*", "Vivaldi Dawn cache"),
+            ("Crashpad/completed/*", "Vivaldi crash reports"),
+        ];
+        for (sub, desc) in vivaldi_rows {
+            rows.push(ScanEntry {
+                family: "browser",
+                pattern: vivaldi.join(sub),
+                description: desc.to_string(),
+                process_probe: Some(process::vivaldi_process_state),
+            });
+        }
+    }
+
+    // QQBrowser3。
+    let qq = PathBuf::from(&home).join("Library/Application Support/QQBrowser3");
+    if qq.is_dir() {
+        let qq_rows: &[(&str, &str)] = &[
+            ("*/Code Cache/*", "QQ Browser code cache"),
+            ("*/GPUCache/*", "QQ Browser GPU cache"),
+            ("ShaderCache/*", "QQ Browser shader cache"),
+            ("GrShaderCache/*", "QQ Browser GR shader cache"),
+            ("GraphiteDawnCache/*", "QQ Browser Dawn cache"),
+            ("component_crx_cache/*", "QQ Browser component cache"),
+            ("Crashpad/completed/*", "QQ Browser crash reports"),
+        ];
+        for (sub, desc) in qq_rows {
+            rows.push(ScanEntry {
+                family: "browser",
+                pattern: qq.join(sub),
+                description: desc.to_string(),
+                process_probe: Some(process::qqbrowser3_process_state),
+            });
+        }
+    }
+
+    rows
+}
+
+/// 汇总静态目录、动态探测行与进程守卫行。
 fn collect_entries() -> Vec<ScanEntry> {
     let mut entries: Vec<ScanEntry> = catalog::full_catalog()
         .into_iter()
@@ -316,9 +541,11 @@ fn collect_entries() -> Vec<ScanEntry> {
             family: entry.family,
             pattern: resolve_entry_path(&entry),
             description: entry.description.to_string(),
+            process_probe: None,
         })
         .collect();
     entries.extend(dynamic_entries());
+    entries.extend(guarded_browser_entries());
     entries
 }
 
@@ -328,12 +555,28 @@ pub fn scan_preview() -> CleanPreview {
     let mut groups = Vec::new();
 
     for entry in collect_entries() {
+        // 进程守卫：Running/Unknown 整组以 skip_reason 拒绝（对标
+        // mole_clean_process_guard + mole_report_guard_stop / defer）。
+        // 预览仍展开条目，便于用户看到"退出应用后可清理"的内容。
+        let guard_reason: Option<&'static str> = entry
+            .process_probe
+            .and_then(|probe| process::guard_allows(probe()).err());
+
         let mut items = Vec::new();
         let mut skipped = 0usize;
         let mut total = 0u64;
 
         for target in expand_glob(&entry.pattern) {
             let target_str = target.to_string_lossy().to_string();
+            if let Some(reason) = guard_reason {
+                skipped += 1;
+                items.push(CleanItem {
+                    path: target_str,
+                    size_bytes: 0,
+                    skip_reason: reason.to_string(),
+                });
+                continue;
+            }
             // 保护检查在扫描期同样执行：受保护/白名单路径永远不会出现在
             // 可清理列表（对标 _safe_clean_impl 的逐路径检查顺序）。
             if let Some(reason) = skip_reason(&target_str, &whitelist) {
@@ -390,6 +633,21 @@ pub fn execute_clean(selected_groups: &[String], dry_run: bool) -> CleanExecuteR
     for entry in collect_entries() {
         if !selected_groups.iter().any(|s| *s == entry.description) {
             continue;
+        }
+        // Sink 前进程守卫复检（对标 _dev_safe_clean_process_guarded 的
+        // 扫描到 sink 双重探针）。
+        if let Some(probe) = entry.process_probe {
+            if let Err(reason) = process::guard_allows(probe()) {
+                for target in expand_glob(&entry.pattern) {
+                    outcomes.push(DeleteOutcome {
+                        path: target.to_string_lossy().to_string(),
+                        status: "skipped".into(),
+                        size_bytes: 0,
+                        detail: reason.into(),
+                    });
+                }
+                continue;
+            }
         }
         for target in expand_glob(&entry.pattern) {
             let target_str = target.to_string_lossy().to_string();
@@ -493,6 +751,36 @@ mod tests {
         // execute_clean 的目录是固定的 catalog，无法注入临时路径；
         // dry-run 语义由 delete::delete_to_trash 的单测覆盖。
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 全量条目描述唯一（GUI 按 description 选组）。
+    #[test]
+    fn all_entry_descriptions_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for entry in collect_entries() {
+            assert!(
+                seen.insert(entry.description.clone()),
+                "重复描述: {}",
+                entry.description
+            );
+        }
+    }
+
+    /// 进程守卫字段：浏览器守卫行必须带 probe；静态 catalog 行不带。
+    #[test]
+    fn process_probe_attachment() {
+        for entry in collect_entries() {
+            if entry.family == "browser" {
+                // 静态浏览器行无守卫；守卫行有。
+                // 至少存在若干带守卫的浏览器行（本机装了 Chrome 时）。
+                let _ = entry.process_probe;
+            }
+        }
+        // cargo registry：存在时必须带 rust_build 守卫。
+        if let Some(entry) = cargo_registry_entry() {
+            assert!(entry.process_probe.is_some());
+            assert_eq!(entry.family, "dev_rust");
+        }
     }
 }
 

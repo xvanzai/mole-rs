@@ -109,6 +109,18 @@ pub fn normalize_existing(path: &str) -> String {
     path.trim_end_matches('/').to_string()
 }
 
+/// 对标 `resolve_tool_home "${ENV:-}" default`：环境变量存在且为绝对路径
+/// 时使用之，否则 `~/{default_relative}`。
+pub fn resolve_tool_home(env_key: &str, default_relative: &str) -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    if let Ok(env_val) = std::env::var(env_key) {
+        if let Some(validated) = validate_probe_output(&env_val) {
+            return PathBuf::from(validated);
+        }
+    }
+    PathBuf::from(home).join(default_relative)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -201,6 +201,34 @@
 
 ---
 
+<a name="clean-3c-guard"></a>
+## clean 深度清理（子模块 3c 第三片：进程守卫 + cargo registry + 浏览器族）
+
+### 对标记录
+
+- `mole_pgrep_any` / `mole_clean_process_guard` 三态 1:1：0=Running，1=Idle，2=Unknown；**仅 Idle 放行**（Unknown 折叠成 Idle 会在进程活跃时删文件，AGENTS.md 明确禁止）。
+- `clean_dev_rust` cargo registry/cache：`rust_build_process_state`（cargo/rustc/rustdoc/clippy-driver/cargo-nextest）守卫 + 物理包含校验（cache 根不得逃出 CARGO_HOME）。
+- `clean_browsers` 静态行 1:1：Safari/Chromium/Puppeteer/Edge/GoogleUpdater/Arc/Dia/Brave/Helium/Yandex/Opera/Vivaldi/Comet/Orion/Zen/QQBrowser3 缓存目录。
+- `clean_browsers` 进程守卫行 1:1：Chrome 档案缓存（is_google_chrome_running）、Firefox、Arc、Brave、Dia、Vivaldi、QQBrowser3——探针非 Idle 时整组 skip_reason 拒绝，预览仍展开便于"退出应用后可清理"提示。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| 探针三态 | mole_pgrep_any 逐 pgrep 子进程 | process::pgrep_any 相同语义 | 无行为变更 | — |
+| 守卫拒绝呈现 | Running → defer 列表；Unknown → 行内警告 | 预览/执行均以 skip_reason（process running / process state unknown）呈现 | **GUI 适配** | CLI 有"Skipped while active"尾部汇总；GUI 需在条目上直接标注原因 |
+| 描述唯一性 | CLI 按行选择，允许重复描述 | GUI 按 description 选组，同名行拆为 "profile"/"User Data" 前缀 | **GUI 适配** | 选择键必须唯一；行为路径集合不变 |
+| Service Worker | clean_service_worker_cache（域名保护 + depth-2） | **未实现** | **暂缓** | 域名保护/符号链接拒绝/部分失败语义需独立子片 |
+| 旧版本清理 | clean_*_old_versions table-driven | **未实现** | **暂缓** | sort -V 多版本比较逻辑独立子片 |
+| cargo registry | 守卫 + 物理包含 + sink 身份绑定 | 守卫 + canonical 包含校验 | **简化** | sink 身份绑定依赖 path snapshot 基建，Rust 侧 Trash 路由已复检；物理逃出仍拒绝 |
+
+### 测试
+
+- 145 个测试通过（新增：pgrep 三态、guard 翻译、浏览器族描述唯一、cargo 守卫字段、全量描述唯一）。
+- 真机冒烟：**107 组**（原 82）；Rust cargo cache 134.28 MB 出现（本机无 cargo 进程）；Dia cache 137.90 MB 出现。
+
+---
+
 <a name="status-系统监控-gpu-bt"></a>
 ## status 系统监控（增量子片：GPU + 蓝牙）
 

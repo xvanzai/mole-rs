@@ -30,6 +30,7 @@ pub fn family_label(family: &str) -> &'static str {
         "dev_perl" => "Perl 工具链",
         "dev_cloud" => "云 CLI 与容器",
         "dev_ci" => "CI 与 DevOps",
+        "browser" => "浏览器缓存",
         _ => "其他",
     }
 }
@@ -118,10 +119,52 @@ pub fn apple_user_cache_catalog() -> Vec<CatalogEntry> {
         .collect()
 }
 
-/// 全量目录（Apple 用户缓存 + 开发工具链族）。
+/// 浏览器族静态缓存行（对标 clean_browsers 中无进程守卫的 safe_clean 行）。
+///
+/// 需要进程守卫的 Chrome/Firefox/Arc/Brave/Dia/Vivaldi/QQBrowser3 档案缓存
+/// 在 mod.rs 的 guarded_entries 中按三态探针动态挂载。
+/// Service Worker CacheStorage 与旧版本清理（table-driven）留待后续子片。
+pub fn browser_catalog() -> Vec<CatalogEntry> {
+    let rows: &[(&str, &str)] = &[
+        ("~/Library/Caches/com.apple.Safari/*", "Safari cache"),
+        ("~/Library/Caches/Chromium/*", "Chromium cache"),
+        ("~/.cache/puppeteer/*", "Puppeteer browser cache"),
+        ("~/Library/Caches/com.microsoft.edgemac/*", "Edge cache"),
+        (
+            "~/Library/Application Support/Google/GoogleUpdater/crx_cache/*",
+            "GoogleUpdater CRX cache",
+        ),
+        (
+            "~/Library/Application Support/Google/GoogleUpdater/*.old",
+            "GoogleUpdater old files",
+        ),
+        ("~/Library/Caches/company.thebrowser.Browser/*", "Arc cache"),
+        ("~/Library/Caches/company.thebrowser.dia/*", "Dia cache"),
+        ("~/Library/Caches/BraveSoftware/Brave-Browser/*", "Brave cache"),
+        ("~/Library/Caches/net.imput.helium/*", "Helium cache"),
+        ("~/Library/Caches/Yandex/YandexBrowser/*", "Yandex cache"),
+        ("~/Library/Caches/com.operasoftware.Opera/*", "Opera cache"),
+        ("~/Library/Caches/com.vivaldi.Vivaldi/*", "Vivaldi cache"),
+        ("~/Library/Caches/Comet/*", "Comet cache"),
+        ("~/Library/Caches/com.kagi.kagimacOS/*", "Orion cache"),
+        ("~/Library/Caches/zen/*", "Zen cache"),
+        ("~/Library/Caches/com.tencent.QQBrowser3/*", "QQ Browser cache"),
+    ];
+    rows.iter()
+        .map(|(path, description)| CatalogEntry {
+            family: "browser",
+            path,
+            home_env: None,
+            description,
+        })
+        .collect()
+}
+
+/// 全量目录（Apple 用户缓存 + 开发工具链 + 浏览器族）。
 pub fn full_catalog() -> Vec<CatalogEntry> {
     let mut all = apple_user_cache_catalog();
     all.extend(dev_toolchain_catalog());
+    all.extend(browser_catalog());
     all
 }
 
@@ -278,6 +321,18 @@ mod tests {
     fn family_labels_cover_all() {
         for e in full_catalog() {
             assert_ne!(family_label(e.family), "其他", "未知族: {}", e.family);
+        }
+    }
+
+    /// 浏览器族入目录且描述唯一（GUI 按描述选组）。
+    #[test]
+    fn browser_catalog_present_and_unique() {
+        let browsers = browser_catalog();
+        assert!(!browsers.is_empty());
+        let mut seen = std::collections::HashSet::new();
+        for e in &browsers {
+            assert!(seen.insert(e.description), "重复描述: {}", e.description);
+            assert_eq!(e.family, "browser");
         }
     }
 }
