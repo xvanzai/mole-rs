@@ -66,6 +66,7 @@ pub fn family_label(family: &str) -> &'static str {
         "app_misc" => "其他应用缓存",
         "owner_command" => "Owner 命令清理",
         "deep_system" => "系统级清理",
+        "app_leftovers" => "应用残留",
         _ => "其他",
     }
 }

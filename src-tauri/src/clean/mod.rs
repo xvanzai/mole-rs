@@ -20,6 +20,7 @@ mod old_versions;
 mod owner_clean;
 mod probe;
 pub(crate) mod brew;
+pub(crate) mod special;
 pub(crate) mod system;
 pub(crate) mod delete;
 pub(crate) mod process;
@@ -1461,6 +1462,97 @@ pub fn scan_preview() -> CleanPreview {
         });
     }
 
+    // orphaned container stubs（对标 clean_orphaned_container_stubs）。
+    {
+        let stubs = special::scan_orphaned_container_stubs();
+        let size: u64 = stubs
+            .iter()
+            .map(|p| path_size_with_deadline(p, global_deadline.min(Instant::now() + SIZE_SCAN_DEADLINE)))
+            .sum();
+        let items: Vec<CleanItem> = stubs
+            .iter()
+            .map(|p| CleanItem {
+                path: p.to_string_lossy().to_string(),
+                size_bytes: 0,
+                skip_reason: String::new(),
+            })
+            .collect();
+        groups.push(CleanGroup {
+            description: "Orphaned container stubs".into(),
+            family: "app_leftovers".into(),
+            items,
+            total_size_bytes: size,
+            skipped_count: 0,
+        });
+    }
+
+    // 设备固件（对标 clean_cached_device_firmware）。
+    {
+        let fw = special::scan_device_firmware();
+        let size: u64 = fw
+            .iter()
+            .map(|p| path_size_with_deadline(p, global_deadline.min(Instant::now() + SIZE_SCAN_DEADLINE)))
+            .sum();
+        let items: Vec<CleanItem> = fw
+            .iter()
+            .map(|p| CleanItem {
+                path: p.to_string_lossy().to_string(),
+                size_bytes: 0,
+                skip_reason: String::new(),
+            })
+            .collect();
+        groups.push(CleanGroup {
+            description: "Device firmware (IPSW)".into(),
+            family: "user_essentials".into(),
+            items,
+            total_size_bytes: size,
+            skipped_count: 0,
+        });
+    }
+
+    // Time Machine 未完成备份（对标 clean_time_machine_failed_backups；只读报告）。
+    {
+        let count = special::count_incomplete_tm_backups();
+        let items: Vec<CleanItem> = match count {
+            Some(n) if n > 0 => vec![CleanItem {
+                path: "/Volumes (Time Machine)".into(),
+                size_bytes: 0,
+                skip_reason: format!("{n} 个未完成备份（审查：tmutil listbackups）"),
+            }],
+            _ => Vec::new(),
+        };
+        let skipped = items.len();
+        groups.push(CleanGroup {
+            description: "Time Machine incomplete backups".into(),
+            family: "user_essentials".into(),
+            items,
+            total_size_bytes: 0,
+            skipped_count: skipped,
+        });
+    }
+
+    // 大文件审查（对标 check_large_file_candidates；只读）。
+    {
+        let large = special::large_file_candidates();
+        let total: u64 = large.iter().map(|(_, _, s)| *s).sum();
+        let items: Vec<CleanItem> = large
+            .iter()
+            .map(|(label, path, size)| CleanItem {
+                path: path.clone(),
+                size_bytes: *size,
+                skip_reason: format!("{label}（≥1GB 审查）"),
+            })
+            .collect();
+        let skipped = items.len();
+        groups.push(CleanGroup {
+            description: "Large files review".into(),
+            family: "user_essentials".into(),
+            items,
+            total_size_bytes: total,
+            skipped_count: skipped,
+        });
+    }
+
     let total_size = groups.iter().map(|g| g.total_size_bytes).sum();
     CleanPreview {
         groups,
@@ -1771,6 +1863,79 @@ pub fn execute_clean(selected_groups: &[String], dry_run: bool) -> CleanExecuteR
             status: result.status,
             size_bytes: 0,
             detail,
+        });
+    }
+
+    // orphaned container stubs（对标 clean_orphaned_container_stubs）。
+    if selected_groups.iter().any(|s| s == "Orphaned container stubs") {
+        let stubs = special::scan_orphaned_container_stubs();
+        let mut removed = 0usize;
+        for p in &stubs {
+            let s = p.to_string_lossy().to_string();
+            let outcome = delete::delete_to_trash(&s, dry_run, "clean");
+            match outcome.status.as_str() {
+                "ok" | "dry-run" => removed += 1,
+                "failed" => failed_count += 1,
+                _ => {}
+            }
+            freed_bytes += outcome.size_bytes;
+        }
+        if !dry_run {
+            deleted_count += removed;
+        }
+        outcomes.push(DeleteOutcome {
+            path: "Orphaned container stubs".into(),
+            status: if dry_run { "dry-run" } else { "ok" }.into(),
+            size_bytes: 0,
+            detail: format!("已清理 {removed} 个孤儿容器"),
+        });
+    }
+
+    // 设备固件（对标 clean_cached_device_firmware）。
+    if selected_groups.iter().any(|s| s == "Device firmware (IPSW)") {
+        let fw = special::scan_device_firmware();
+        let mut removed = 0usize;
+        for p in &fw {
+            let s = p.to_string_lossy().to_string();
+            let outcome = delete::delete_to_trash(&s, dry_run, "clean");
+            match outcome.status.as_str() {
+                "ok" | "dry-run" => removed += 1,
+                "failed" => failed_count += 1,
+                _ => {}
+            }
+            freed_bytes += outcome.size_bytes;
+        }
+        if !dry_run {
+            deleted_count += removed;
+        }
+        outcomes.push(DeleteOutcome {
+            path: "Device firmware (IPSW)".into(),
+            status: if dry_run { "dry-run" } else { "ok" }.into(),
+            size_bytes: 0,
+            detail: format!("已清理 {removed} 个 IPSW"),
+        });
+    }
+
+    // Time Machine / Large files：只读报告，不执行删除。
+    if selected_groups.iter().any(|s| s == "Time Machine incomplete backups") {
+        let count = special::count_incomplete_tm_backups();
+        outcomes.push(DeleteOutcome {
+            path: "Time Machine".into(),
+            status: "skipped".into(),
+            size_bytes: 0,
+            detail: match count {
+                Some(n) => format!("{n} 个未完成备份（只读审查）"),
+                None => "无未完成备份或不可用".into(),
+            },
+        });
+    }
+    if selected_groups.iter().any(|s| s == "Large files review") {
+        let large = special::large_file_candidates();
+        outcomes.push(DeleteOutcome {
+            path: "Large files".into(),
+            status: "skipped".into(),
+            size_bytes: 0,
+            detail: format!("{} 个 ≥1GB 路径（只读审查）", large.len()),
         });
     }
 

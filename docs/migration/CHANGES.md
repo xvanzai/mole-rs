@@ -1268,3 +1268,28 @@
 ### 测试
 
 - 200 个测试通过；真机冒烟：Finder metadata 39 项 0.45 MB、Homebrew 35.35 MB 可见。
+
+---
+
+<a name="clean-special"></a>
+## clean 深度清理：orphaned container stubs + 设备固件 + Time Machine + 大文件审查
+
+### 对标记录
+
+- `clean_orphaned_container_stubs`：CleanMyMac glob 匹配空容器（仅 metadata.plist）+ 关联 app 不存在 → Trash。
+- `clean_cached_device_firmware`：iTunes 三目录 maxdepth 1 + Configurator group containers 下 *.ipsw → Trash。
+- `clean_time_machine_failed_backups`：AutoBackup 配置 + destinationinfo + listbackups 计数（**只读报告**，不删除）。
+- `check_large_file_candidates`：13 个已知大路径 ≥1GB 审查清单（**只读报告**）。
+
+### 变更前后对照
+
+| 项 | 原实现 | Rust 实现 | 是否变更 | 原因 |
+|----|--------|----------|---------|------|
+| 孤儿 app data | scan_installed_apps + 身份快照 | **未实现** | **暂缓** | 需完整应用清单+身份绑定；孤儿检测语义复杂 |
+| orphaned system services | sudo + 已知保护模式表 | **未实现** | **暂缓** | 涉 sudo 读取 LaunchDaemons + 大表保护模式 |
+| TM 未完成备份 | 列表+删除 | 仅计数报告 | **简化** | 删除未完成备份风险高；GUI 引导手动 tmutil |
+| 大文件 | du 逐项+日期 | path_size + 无日期 | **简化** | 日期列可后续补 |
+
+### 测试
+
+- 205 个测试通过；真机冒烟 347 组（原 343）。
