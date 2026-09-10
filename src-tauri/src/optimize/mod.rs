@@ -76,6 +76,8 @@ pub fn task_catalog() -> Vec<OptimizeTask> {
                     | "network_stack_optimize"
                     | "disk_permissions_repair"
                     | "periodic_maintenance"
+                    | "shared_file_list_repair"
+                    | "disk_verify"
             ),
         })
         .collect()
@@ -243,6 +245,14 @@ pub fn execute(selected: &[String], dry_run: bool) -> OptimizeResult {
             }
             "periodic_maintenance" => {
                 let (outcome, detail) = periodic_maintenance(dry_run);
+                record(&mut outcomes, task.action, outcome, &detail);
+            }
+            "shared_file_list_repair" => {
+                let (outcome, detail) = shared_file_list_repair(dry_run);
+                record(&mut outcomes, task.action, outcome, &detail);
+            }
+            "disk_verify" => {
+                let (outcome, detail) = disk_verify(dry_run);
                 record(&mut outcomes, task.action, outcome, &detail);
             }
             "saved_state_cleanup" => {
@@ -1434,6 +1444,138 @@ fn periodic_maintenance(dry_run: bool) -> (Outcome, String) {
     }
 }
 
+/// 对标 `opt_shared_file_list_repair`：~/Library/Application Support/
+/// com.apple.sharedfilelist 下 *.sfl2/*.sfl3（排除 ApplicationRecentDocuments
+/// 用户数据），plutil -lint 失败的损坏文件走 Trash。
+/// lint 用 plist crate 解析替代 plutil 子进程（同为语法校验，同 7g 差异）。
+fn shared_file_list_repair(dry_run: bool) -> (Outcome, String) {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let sfl_dir = Path::new(&home).join("Library/Application Support/com.apple.sharedfilelist");
+    if !sfl_dir.is_dir() {
+        return (Outcome::Unchanged, "共享文件列表目录不存在".into());
+    }
+
+    // 有界收集（5s 预算；超时放弃整批——对标 run_with_timeout）。
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    let mut timed_out = false;
+    let mut stack = vec![sfl_dir.clone()];
+    while let Some(dir) = stack.pop() {
+        if Instant::now() >= deadline {
+            timed_out = true;
+            break;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            if Instant::now() >= deadline {
+                timed_out = true;
+                break;
+            }
+            let path = entry.path();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            // find：\( -name "*.sfl2" -o -name "*.sfl3" \) -type f
+            // ! -path "*ApplicationRecentDocuments*"
+            if !(name.ends_with(".sfl2") || name.ends_with(".sfl3")) {
+                continue;
+            }
+            let path_str = path.to_string_lossy();
+            if path_str.contains("ApplicationRecentDocuments") {
+                continue;
+            }
+            candidates.push(path);
+        }
+    }
+    if timed_out {
+        return (Outcome::Unchanged, "扫描超时，本批放弃".into());
+    }
+
+    let mut repaired = 0usize;
+    let mut failed = 0usize;
+    for path in &candidates {
+        if !path.is_file() {
+            continue;
+        }
+        // plutil -lint：解析失败 = 损坏。
+        if plist::Value::from_file(path).is_ok() {
+            continue;
+        }
+        let path_str = path.to_string_lossy().to_string();
+        if dry_run {
+            repaired += 1;
+            continue;
+        }
+        let outcome = crate::clean::delete::delete_to_trash(&path_str, false, "optimize");
+        match outcome.status.as_str() {
+            "ok" => repaired += 1,
+            "failed" => failed += 1,
+            _ => {}
+        }
+    }
+
+    if failed > 0 {
+        return (
+            Outcome::Failed,
+            format!("{failed} 个共享文件列表修复失败"),
+        );
+    }
+    if repaired > 0 {
+        return (
+            Outcome::Applied,
+            format!("已修复 {repaired} 个损坏的共享文件列表"),
+        );
+    }
+    (Outcome::Unchanged, "共享文件列表全部健康".into())
+}
+
+/// 对标 `opt_disk_verify`：默认跳过（MOLE_ENABLE_DISK_VERIFY=1 才启用）——
+/// verifyVolume 的内核级 I/O 无法被 SIGKILL 打断，可能导致系统冻结。
+fn disk_verify(dry_run: bool) -> (Outcome, String) {
+    let enabled = matches!(
+        std::env::var("MOLE_ENABLE_DISK_VERIFY").as_deref(),
+        Ok("1")
+    );
+    if !enabled {
+        return (
+            Outcome::Skipped,
+            "磁盘校验已跳过（设置 MOLE_ENABLE_DISK_VERIFY=1 启用）".into(),
+        );
+    }
+    if dry_run {
+        return (Outcome::Skipped, "dry-run 下跳过磁盘校验".into());
+    }
+
+    let output = crate::status::run_cmd(
+        "diskutil",
+        &["verifyVolume", "/"],
+        Duration::from_secs(300),
+    );
+    match output {
+        Err(e) if e.contains("exited") => {
+            // 退出码非 0（对标 verify_status -ne 0）。
+            (Outcome::Failed, format!("磁盘校验失败：{e}"))
+        }
+        Err(_) => (Outcome::Failed, "磁盘校验超时或无法执行".into()),
+        Ok(out) => {
+            let lower = out.to_lowercase();
+            if lower.contains("appears to be ok") || lower.contains("volume appears to be ok") {
+                (Outcome::Unchanged, "磁盘文件系统校验通过".into())
+            } else if lower.contains("error") || lower.contains("corrupt") || lower.contains("invalid") {
+                (
+                    Outcome::Attention,
+                    "检测到磁盘问题 · 建议：sudo diskutil repairVolume /".into(),
+                )
+            } else {
+                (Outcome::Failed, "磁盘校验结果无法识别".into())
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1479,6 +1621,8 @@ mod tests {
                     | "network_stack_optimize"
                     | "disk_permissions_repair"
                     | "periodic_maintenance"
+                    | "shared_file_list_repair"
+                    | "disk_verify"
             );
             assert_eq!(t.implemented, implemented, "{} 标记不一致", t.action);
         }
@@ -1517,6 +1661,8 @@ mod smoke_tests {
             "network_stack_optimize".to_string(),
             "disk_permissions_repair".to_string(),
             "periodic_maintenance".to_string(),
+            "shared_file_list_repair".to_string(),
+            "disk_verify".to_string(),
         ], true);
         for res in &r.results {
             println!("[{}] {} ({})", res.outcome, res.action, res.detail);
@@ -1690,5 +1836,18 @@ mod network_launch_tests {
             matches!(outcome, Outcome::Unchanged | Outcome::Applied | Outcome::Failed),
             "unexpected: {outcome:?}"
         );
+    }
+
+    /// disk_verify 默认关闭 → Skipped（对标 MOLE_ENABLE_DISK_VERIFY 门）。
+    #[test]
+    fn disk_verify_default_disabled() {
+        unsafe { std::env::remove_var("MOLE_ENABLE_DISK_VERIFY") };
+        let (outcome, _) = disk_verify(false);
+        assert_eq!(outcome, Outcome::Skipped);
+        // dry-run 即使启用也跳过。
+        unsafe { std::env::set_var("MOLE_ENABLE_DISK_VERIFY", "1") };
+        let (outcome, _) = disk_verify(true);
+        assert_eq!(outcome, Outcome::Skipped);
+        unsafe { std::env::remove_var("MOLE_ENABLE_DISK_VERIFY") };
     }
 }

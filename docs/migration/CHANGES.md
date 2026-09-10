@@ -707,3 +707,28 @@
 - 134 个测试通过（新增：VPN 覆盖语义、权限探针不 panic、network_stack dry-run 非致命）。
 - 真机 dry-run 冒烟：network_stack_optimize → unchanged（本机无 VPN 且网络健康）；disk_permissions_repair → unchanged（权限正常）；periodic_maintenance → unavailable（本机 macOS 26+ 无 periodic，与原实现一致）。
 - optimize 已移植 **16/21** 处理器。
+
+---
+
+<a name="optimize-7j"></a>
+## optimize 优化维护（模块7第十片：shared_file_list_repair + disk_verify）
+
+### 对标记录
+
+- `opt_shared_file_list_repair` 1:1：sfl_dir 不存在 → Unchanged；有界扫描（5s）收集 `*.sfl2`/`*.sfl3`（排除 `*ApplicationRecentDocuments*` 用户数据）→ 损坏（lint 失败）走 Trash → counts 映射。
+- `opt_disk_verify` 1:1：`MOLE_ENABLE_DISK_VERIFY≠1` → Skipped（门控）；dry-run → Skipped；真实：`diskutil verifyVolume /` → "appears to be OK" Unchanged / error|corrupt|invalid Attention / 其余 Failed。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| sfl lint | plutil -lint 子进程 | plist crate 直读 | 实现差异（语义一致） | 同 7g：语法校验等价，免 fork |
+| 扫描 | find -print0 | walkdir 栈 + 5s 预算 | 无行为变更 | 超时放弃整批，fail-closed |
+| verifyVolume 超时 | MOLE_TIMEOUT_DISK_VERIFY_SEC（30s 默认） | 300s 硬编码 | **放宽** | 原 30s 对完整卷校验过短，且该任务默认关闭；保持可中断性依赖原门控 |
+| 结果识别 | grep -qi | to_lowercase contains | 无行为变更 | LC_ALL=C 下英文子串稳定 |
+
+### 测试
+
+- 135 个测试通过（新增：disk_verify 默认门控 + dry-run 跳过）。
+- 真机 dry-run 冒烟：shared_file_list_repair → unchanged（全部健康）；disk_verify → skipped（门控关闭）。
+- optimize 已移植 **18/21** 处理器。
