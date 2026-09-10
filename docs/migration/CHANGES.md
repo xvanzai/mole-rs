@@ -1215,3 +1215,33 @@
 ### 测试
 
 - 190 个测试通过（新增：系统文件扫描守卫矩阵）。
+
+---
+
+<a name="process-watch-spotlight"></a>
+## status ProcessWatch + analyze Spotlight 大文件
+
+### 对标记录
+
+**ProcessWatch**（process_watch.go 150 行）
+- 三元组 (pid, ppid, command) 跟踪；CPU ≥ 阈值持续 ≥ window 才触发（防抖）；
+- 进程消失/CPU 回落 → 清除；快照按 active→触发时间→CPU 降序→PID 排序。
+- GUI 差异：CLI 长驻 watch 会话 → Collector 每次 process/full 采集后 Update，
+  告警随快照 `process_alerts` 字段返回；`configure_process_watch` 供设置项。
+
+**analyze Spotlight 大文件**（scanner.go findLargeFilesWithSpotlight）
+- mdfind -onlyin root "kMDItemFSSize >= 100MB"（5s 超时）；
+- 折叠目录跳过；稀疏文件 min(blocks*512, len)；Top-20；
+- 仅在 Spotlight 结果比遍历更多时替换（对标 if len > len）。
+
+### 变更前后对照
+
+| 项 | 原实现 | Rust 实现 | 是否变更 | 原因 |
+|----|--------|----------|---------|------|
+| ProcessWatch 驱动 | CLI 长驻 Update 循环 | Collector apply_process_data 调用 | **GUI 适配** | GUI 非长驻；每次采集刷新状态机 |
+| triggered_at | time.Time | Instant + elapsed 秒序列化 | 实现差异 | JSON 输出秒数；排序用绝对 Instant |
+| Spotlight | findLargeFilesWithSpotlight + heap | 同语义 + sort/truncate | 无行为变更 | — |
+
+### 测试
+
+- 198 个测试通过（新增：ProcessWatch 6 例、fold_dir、spotlight 不 panic）。

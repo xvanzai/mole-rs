@@ -19,6 +19,7 @@ mod health;
 mod memory;
 mod network;
 mod processes;
+mod process_watch;
 mod types;
 
 pub use types::*;
@@ -210,6 +211,8 @@ pub struct Collector {
 
     // 进程数据缓存（对标 processEnrichment）。
     process_enrichment: Option<ProcessEnrichment>,
+    // ProcessWatch 告警状态机（对标 ProcessWatcher）。
+    process_watcher: process_watch::ProcessWatcher,
 }
 
 #[derive(Clone)]
@@ -288,7 +291,17 @@ impl Collector {
             last_full_at: None,
             last_process_at: None,
             process_enrichment: None,
+            process_watcher: process_watch::ProcessWatcher::default(),
         }
+    }
+
+    /// 配置 ProcessWatch（对标 ProcessWatchOptions；GUI 设置项）。
+    #[allow(dead_code)] // 公开 API：命令层调用
+    pub fn configure_process_watch(&mut self, enabled: bool, cpu_threshold: f64, window_secs: u64) {
+        let opts = self.process_watcher.options_mut();
+        opts.enabled = enabled;
+        opts.cpu_threshold = cpu_threshold;
+        opts.window = Duration::from_secs(window_secs.max(1));
     }
 
     /// 对标 `nextCollectionMode`。
@@ -397,6 +410,7 @@ impl Collector {
             zombie_count: None,
             zombie_parents: Vec::new(),
             zombie_parents_complete: None,
+            process_alerts: Vec::new(),
         }
     }
 
@@ -471,6 +485,7 @@ impl Collector {
             zombie_count: None,
             zombie_parents: Vec::new(),
             zombie_parents_complete: None,
+            process_alerts: Vec::new(),
         };
 
         let procs = processes::collect_processes();
@@ -489,6 +504,8 @@ impl Collector {
         snap.top_processes = processes::top_processes(procs, 5);
         snap.process_collected_at = Some(now_unix());
         snap.process_stale = Some(false);
+        // ProcessWatch 告警（对标 ProcessWatcher.Update）。
+        snap.process_alerts = self.process_watcher.update(procs);
         let (count, parents, complete) =
             processes::summarize_zombies(procs, processes::ZOMBIE_PARENT_LIMIT, parents_available);
         snap.zombie_count = Some(count);

@@ -42,6 +42,9 @@ pub struct MetricsSnapshot {
     pub zombie_count: Option<i64>,
     pub zombie_parents: Vec<ZombieParent>,
     pub zombie_parents_complete: Option<bool>,
+    /// ProcessWatch 告警（对标 process_alerts；禁用时为空）。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub process_alerts: Vec<super::process_watch::ProcessAlert>,
 }
 
 /// 对标 `HardwareInfo`。

@@ -351,6 +351,15 @@ pub fn scan_path(root: &str) -> Result<ScanResult, String> {
     };
     large_files.sort_by(|a, b| b.size.cmp(&a.size));
 
+    // Spotlight 大文件扩展（对标 findLargeFilesWithSpotlight）：mdfind 找
+    // kMDItemFSSize ≥ 100MB 的文件，仅在结果比遍历更多时替换（对标
+    // if len(spotlightFiles) > len(liveFiles)）。
+    if let Ok(spotlight_files) = find_large_files_with_spotlight(&root_path) {
+        if spotlight_files.len() > large_files.len() {
+            large_files = spotlight_files;
+        }
+    }
+
     let mut entries: Vec<DirEntry> = Vec::with_capacity(tops.len());
     let mut dir_bucket = 0usize;
     for (idx, t) in tops.into_iter().enumerate() {
@@ -389,6 +398,70 @@ pub fn scan_path(root: &str) -> Result<ScanResult, String> {
         cache::put(&result.path, &result);
     }
     Ok(result)
+}
+
+/// 对标 findLargeFilesWithSpotlight：mdfind kMDItemFSSize ≥ minSize。
+/// 5s 超时（对标 mdlsTimeout）；失败返回 Err（调用方忽略）。
+fn find_large_files_with_spotlight(root: &Path) -> Result<Vec<FileEntry>, ()> {
+    const MIN_SIZE: u64 = 100 << 20; // spotlightMinFileSize = 100MB
+    if !crate::clean::command_exists("mdfind") {
+        return Err(());
+    }
+    let root_str = root.to_string_lossy().to_string();
+    let query = format!("kMDItemFSSize >= {MIN_SIZE}");
+    let out = crate::status::run_cmd(
+        "mdfind",
+        &["-onlyin", &root_str, &query],
+        Duration::from_secs(5),
+    )
+    .map_err(|_| ())?;
+
+    let mut results: Vec<FileEntry> = Vec::new();
+    for line in out.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let p = Path::new(line);
+        // 跳过目录/符号链接；仅 regular file。
+        let Ok(meta) = std::fs::symlink_metadata(p) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        // 折叠目录跳过（对标 isInFoldedDir）。
+        if line.split('/').any(|part| is_fold_dir(part)) {
+            continue;
+        }
+        // 稀疏/云文件实际占用（对标 getActualFileSize：min(blocks*512, len)）。
+        let size = {
+            use std::os::unix::fs::MetadataExt;
+            meta.len().min(meta.blocks() * 512)
+        };
+        if size < MIN_SIZE {
+            continue;
+        }
+        results.push(FileEntry {
+            name: p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            path: line.to_string(),
+            size,
+        });
+    }
+    // 大→小 + Top-20（对标堆）。
+    results.sort_by(|a, b| b.size.cmp(&a.size));
+    results.truncate(MAX_LARGE_FILES);
+    Ok(results)
+}
+
+/// 对标 foldDirs 的关键条目（VCS/系统元数据）。
+fn is_fold_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | ".svn" | ".hg" | ".Spotlight-V100" | ".fseventsd" | ".TemporaryItems"
+    )
 }
 
 /// 读取路径的缓存扫描结果（对标 loadStoredOverviewSize 的路径级命中）。
@@ -617,5 +690,26 @@ mod smoke_tests {
         }
         assert!(!result.entries.is_empty());
         assert!(result.total_size > 0);
+    }
+}
+
+#[cfg(test)]
+mod spotlight_tests {
+    use super::*;
+
+    /// 折叠目录名匹配。
+    #[test]
+    fn fold_dir_matching() {
+        assert!(is_fold_dir(".git"));
+        assert!(is_fold_dir(".Spotlight-V100"));
+        assert!(!is_fold_dir("Documents"));
+        assert!(!is_fold_dir(".hidden_normal"));
+    }
+
+    /// mdfind 不可用或无结果时不 panic。
+    #[test]
+    fn spotlight_large_files_no_panic() {
+        let tmp = std::env::temp_dir();
+        let _ = find_large_files_with_spotlight(&tmp);
     }
 }
