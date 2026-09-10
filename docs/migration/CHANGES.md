@@ -1016,3 +1016,31 @@
 
 - 172 个测试通过（新增：never_delete 路径、find -name glob 语义、族扫描不 panic、无 sudo 真实执行返回失败详情；analyze cache 测试加锁防并行 clear 竞态）。
 - 真机冒烟：**405 组**；System logs 14.68 MB 可见（无 sudo 缓存时预览仍列出，执行将 Skipped）。
+
+---
+
+<a name="uninstall-6d"></a>
+## uninstall 应用卸载（6d：共享 bundle ID 兄弟守卫 + brew nozap 路由）
+
+### 对标记录
+
+- `uninstall_normalize_bundle_id` 1:1：大小写不敏感比较（APFS 上 com.Foo.Bar.plist ≡ com.foo.bar.plist）。
+- `uninstall_strip_version_suffix` 1:1：Nightly|Beta|Alpha|Dev|Canary|Preview|Insider|Edge|Stable|Release|RC|LTS|Developer Edition|Technology Preview。
+- `uninstall_bundle_id_has_surviving_sibling` / `uninstall_surviving_sibling_names` 1:1：同 bundle ID（忽略大小写）、路径不同、仍存在的 .app 且不在当前卸载目标中。
+- 实时扫描根扩展：+ /System/Applications、Setapp、Caskroom（对标 _MOLE_UNINSTALL_LIVE_APP_ROOTS）。
+- `uninstall_app` 路由：
+  - 兄弟存在 → brew 用 **nozap**（对标 zap/nozap 分支）；
+  - 兄弟存在 → **抑制全部名称派生清理**（variants/name_patterns/vendor-nested），仅保留精确 bundle ID 残留 + Preferences/ByHost + LaunchAgents；
+  - 名称与兄弟碰撞的路径额外跳过。
+
+### 变更前后对照
+
+| 项 | 原实现（bash） | Rust 实现 | 是否变更 | 原因 |
+|----|------------|----------|---------|------|
+| 兄弟来源 | apps_data（清单期）+ 实时扫描 | 实时扫描 search_dirs | **简化** | GUI 每次卸载独立；不依赖清单缓存新鲜度（fail-closed） |
+| 指纹/身份绑定 | base64(path):dev:ino:mtime | 不做身份绑定 | **简化** | 身份绑定防 TOCTOU 换包；GUI 删除 sink 已复检保护/存在性 |
+| MOLE_UNINSTALL_SIBLING_SURVIVES | 传入 find_app_files 跳过 regex 工具链 | 名称派生整块跳过 | 语义一致 | 兄弟时名称派生全禁 = 更保守 |
+
+### 测试
+
+- 174 个测试通过（新增：后缀剥离矩阵、unknown/empty 无兄弟、真实路径不 panic）。

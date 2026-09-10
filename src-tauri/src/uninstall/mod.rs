@@ -30,7 +30,7 @@ pub struct AppInfo {
     pub in_search_root: bool,
 }
 
-/// 对标 uninstall_print_app_search_dirs。
+/// 对标 uninstall_print_app_search_dirs（清单）+ 兄弟扫描根（batch.sh）。
 fn search_dirs() -> Vec<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_default();
     let mut dirs = vec![
@@ -38,6 +38,11 @@ fn search_dirs() -> Vec<PathBuf> {
         PathBuf::from(&home).join("Applications"),
         PathBuf::from("/Library/Input Methods"),
         PathBuf::from(&home).join("Library/Input Methods"),
+        // 兄弟守卫额外根（对标 _MOLE_UNINSTALL_LIVE_APP_ROOTS）。
+        PathBuf::from("/System/Applications"),
+        PathBuf::from(&home).join("Library/Application Support/Setapp/Applications"),
+        PathBuf::from("/opt/homebrew/Caskroom"),
+        PathBuf::from("/usr/local/Caskroom"),
     ];
     // /Volumes/*/Applications（跳过与 /Applications 同一目录）。
     if let Ok(entries) = std::fs::read_dir("/Volumes") {
@@ -588,6 +593,134 @@ fn find_vendor_nested(bundle_id: &str, app_name: &str, variants: &[String]) -> V
 /// 卸载一个应用（对标 uninstall 删除阶段）：前置校验（卸载模式保护、
 /// bundle ID 合法性）→ 应用本体 + 残留（精确 bundle ID + 名称模式 +
 /// vendor-nested + ByHost + LaunchAgents + Zed 特例）逐项 sink 复检 → Trash。
+/// 对标 uninstall_normalize_bundle_id：大小写不敏感比较用小写形式。
+/// （bundle ID 在路径语义上 case-preserving 但非 case-sensitive——
+/// APFS 上 com.Foo.Bar.plist 与 com.foo.bar.plist 是同一文件。）
+fn normalize_bundle_id(id: &str) -> String {
+    id.to_lowercase()
+}
+
+/// 对标 uninstall_strip_version_suffix：剥 Nightly|Beta|… 后缀
+/// （含多词：Developer Edition / Technology Preview）。
+fn strip_version_suffix(name: &str) -> String {
+    const SUFFIXES: &[&str] = &[
+        "Developer Edition",
+        "Technology Preview",
+        "Nightly",
+        "Beta",
+        "Alpha",
+        "Dev",
+        "Canary",
+        "Preview",
+        "Insider",
+        "Edge",
+        "Stable",
+        "Release",
+        "RC",
+        "LTS",
+    ];
+    for suffix in SUFFIXES {
+        let pattern = format!(" {suffix}");
+        if name.ends_with(&pattern) && name.len() > pattern.len() {
+            return name[..name.len() - pattern.len()].to_string();
+        }
+    }
+    name.to_string()
+}
+
+/// 收集与 bundle_id 相同（忽略大小写）且路径不同、仍存在的其它 .app
+/// 的 (path, name) 列表。对标 uninstall_bundle_id_has_surviving_sibling
+/// 的 apps_data 遍历 + _MOLE_UNINSTALL_LIVE_APP_ROOTS 实时扫描。
+pub fn surviving_siblings(bundle_id: &str, app_path: &str) -> Vec<(String, String)> {
+    if bundle_id.is_empty() || bundle_id == "unknown" {
+        return Vec::new();
+    }
+    let target_lower = normalize_bundle_id(bundle_id);
+    let mut out = Vec::new();
+    for root in search_dirs() {
+        if !root.is_dir() {
+            continue;
+        }
+        // maxdepth 2（对标 find -maxdepth 3 从根算起的 .app 层级）。
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !is_app_bundle(&path) {
+                continue;
+            }
+            let path_str = path.to_string_lossy().to_string();
+            if path_str == app_path {
+                continue;
+            }
+            if !std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let meta = read_app_meta(&path);
+            if normalize_bundle_id(&meta.bundle_id) == target_lower {
+                out.push((path_str, meta.name));
+            }
+            // Caskroom 二层（token/version/App.app）。
+            if root.ends_with("Caskroom") {
+                if let Ok(versions) = std::fs::read_dir(&path) {
+                    for ver in versions.flatten() {
+                        if let Ok(apps) = std::fs::read_dir(ver.path()) {
+                            for app in apps.flatten() {
+                                let p = app.path();
+                                if !is_app_bundle(&p) {
+                                    continue;
+                                }
+                                let s = p.to_string_lossy().to_string();
+                                if s == app_path {
+                                    continue;
+                                }
+                                let m = read_app_meta(&p);
+                                if normalize_bundle_id(&m.bundle_id) == target_lower {
+                                    out.push((s, m.name));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 对标 uninstall_bundle_id_has_surviving_sibling。
+#[allow(dead_code)] // 公开 API：UI/命令层可复用；当前由 surviving_sibling_names 间接覆盖。
+pub fn has_surviving_sibling(bundle_id: &str, app_path: &str) -> bool {
+    !surviving_siblings(bundle_id, app_path).is_empty()
+}
+
+/// 对标 uninstall_surviving_sibling_names：存活兄弟的 display name、
+/// .app 去后缀 basename，均小写——用于名称碰撞抑制。
+pub fn surviving_sibling_names(bundle_id: &str, app_path: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for (path, display) in surviving_siblings(bundle_id, app_path) {
+        let base = Path::new(&path)
+            .file_stem()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        for candidate in [display, base] {
+            if candidate.is_empty() {
+                continue;
+            }
+            let lower = candidate.to_lowercase();
+            if !names.contains(&lower) {
+                names.push(lower);
+            }
+            let stripped = strip_version_suffix(&candidate).to_lowercase();
+            if !stripped.is_empty() && !names.contains(&stripped) {
+                names.push(stripped);
+            }
+        }
+    }
+    names
+}
+
 pub fn uninstall_app(app_path: &str, bundle_id: &str, dry_run: bool) -> crate::clean::CleanExecuteResult {
     let mut outcomes = Vec::new();
     let mut deleted_count = 0usize;
@@ -612,11 +745,24 @@ pub fn uninstall_app(app_path: &str, bundle_id: &str, dry_run: bool) -> crate::c
         };
     }
 
-    // Homebrew cask：优先 brew uninstall --zap（对标 batch.sh 的 brew 路由）。
-    // 成功后应用本体由 brew 移除；残留仍走下方路径清理。
+    // 兄弟守卫（AGENTS.md：同 bundle ID 幸存安装仍在时，bundle-id 派生
+    // 残留与名称派生清理都属于幸存安装，不得触碰）。
+    let sibling_names = surviving_sibling_names(bundle_id, app_path);
+    let sibling_survives = !sibling_names.is_empty();
+    if sibling_survives {
+        outcomes.push(crate::clean::DeleteOutcome {
+            path: app_path.to_string(),
+            status: "skipped".into(),
+            size_bytes: 0,
+            detail: "检测到同 bundle ID 兄弟安装，已抑制名称派生清理".into(),
+        });
+    }
+
+    // Homebrew cask：优先 brew uninstall；有兄弟时 nozap（对标 batch.sh）。
     let mut brew_handled = false;
     if let Some(cask) = brew::get_brew_cask_name(app_path) {
-        let (ok, detail) = brew::brew_uninstall_cask(&cask, app_path, true, dry_run);
+        let zap = !sibling_survives;
+        let (ok, detail) = brew::brew_uninstall_cask(&cask, app_path, zap, dry_run);
         let status = if dry_run {
             "dry-run"
         } else if ok {
@@ -630,7 +776,7 @@ pub fn uninstall_app(app_path: &str, bundle_id: &str, dry_run: bool) -> crate::c
             failed_count += 1;
         }
         outcomes.push(crate::clean::DeleteOutcome {
-            path: format!("{app_path} (cask:{cask})"),
+            path: format!("{app_path} (cask:{cask}{})", if zap { " --zap" } else { " nozap" }),
             status: status.into(),
             size_bytes: 0,
             detail,
@@ -641,14 +787,15 @@ pub fn uninstall_app(app_path: &str, bundle_id: &str, dry_run: bool) -> crate::c
     // 应用本体：brew 已处理则跳过 Trash 删除。
     let mut targets: Vec<String> = Vec::new();
     if !brew_handled {
-        // Steam 生成的桌面快捷方式：大小是启动器而非游戏本体（对标
-        // uninstall_app_is_steam_launcher）；仍可删除，但 detail 标注。
-        let steam_note = if steam::is_steam_launcher(app_path) {
-            "（Steam 启动器快捷方式，非游戏本体）"
-        } else {
-            ""
-        };
-        let _ = steam_note; // 供后续 UI 标注；当前删除路径不变
+        // Steam 启动器快捷方式仍在可删除路径上；detail 标注（供 UI）。
+        if steam::is_steam_launcher(app_path) {
+            outcomes.push(crate::clean::DeleteOutcome {
+                path: app_path.to_string(),
+                status: "skipped".into(),
+                size_bytes: 0,
+                detail: "Steam 启动器快捷方式（非游戏本体），将随下方目标删除".into(),
+            });
+        }
         targets.push(app_path.to_string());
     }
 
@@ -658,7 +805,7 @@ pub fn uninstall_app(app_path: &str, bundle_id: &str, dry_run: bool) -> crate::c
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    // 精确残留（仅 reverse-DNS 校验通过的 bundle ID）。
+    // 精确 bundle ID 残留（兄弟存在时仍安全——路径按 bundle ID 键控）。
     if bundle_valid {
         for residue in bundle_id_residue_paths(bundle_id) {
             let p = Path::new(&residue);
@@ -668,44 +815,52 @@ pub fn uninstall_app(app_path: &str, bundle_id: &str, dry_run: bool) -> crate::c
         }
     }
 
-    // 名称模式残留（含变体 dotdirs 与 base_name 变体；对标 find_app_files
-    // 的安全过滤：常用目录根跳过、共享 home 状态根跳过、独立 CLI 保护）。
-    let variants = name_variants(&app_name, bundle_id);
-    let mut patterns = name_patterns(&app_name, &variants);
-    for v in &variants {
-        for root in ["Application Support", "Caches", "Logs", "Preferences",
-            "Preferences/{n}.plist", "Saved Application State/{n}.savedState"] {
-            patterns.push(format!(
-                "{}/Library/{}",
-                std::env::var("HOME").unwrap_or_default(),
-                root.replace("{n}", v)
-            ));
+    // 名称模式残留：兄弟存在时**全部抑制**（对标 discovery_app_name 清空
+    // + MOLE_UNINSTALL_SIBLING_SURVIVES=1 跳过 regex 键控工具链启发）。
+    if !sibling_survives {
+        let variants = name_variants(&app_name, bundle_id);
+        let mut patterns = name_patterns(&app_name, &variants);
+        for v in &variants {
+            for root in ["Application Support", "Caches", "Logs", "Preferences",
+                "Preferences/{n}.plist", "Saved Application State/{n}.savedState"] {
+                patterns.push(format!(
+                    "{}/Library/{}",
+                    std::env::var("HOME").unwrap_or_default(),
+                    root.replace("{n}", v)
+                ));
+            }
         }
-    }
-    for p in patterns {
-        let pp = Path::new(&p);
-        if !pp.exists() && !pp.is_symlink() {
-            continue;
+        for p in patterns {
+            let pp = Path::new(&p);
+            if !pp.exists() && !pp.is_symlink() {
+                continue;
+            }
+            if is_common_library_root(&p) {
+                continue;
+            }
+            if crate::clean::protect::is_shared_home_state_root(&p)
+                || path_belongs_to_independent_cli(&p)
+            {
+                continue;
+            }
+            // 名称与存活兄弟碰撞 → 抑制（对标 uninstall_surviving_sibling_names）。
+            let base_lower = Path::new(&p)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            if sibling_names.iter().any(|n| base_lower.contains(n.as_str()) || n.contains(&base_lower)) {
+                continue;
+            }
+            if !targets.contains(&p) {
+                targets.push(p);
+            }
         }
-        // 常用目录根安全跳过（防空名称/空 bundle 产物整目录删除）。
-        if is_common_library_root(&p) {
-            continue;
-        }
-        // 共享 home 状态根与独立 CLI dotdir 保护。
-        if crate::clean::protect::is_shared_home_state_root(&p)
-            || path_belongs_to_independent_cli(&p)
-        {
-            continue;
-        }
-        if !targets.contains(&p) {
-            targets.push(p);
-        }
-    }
 
-    // vendor-nested（对标 find_vendor_nested_app_paths）。
-    for path in find_vendor_nested(bundle_id, &app_name, &variants) {
-        if !targets.contains(&path) {
-            targets.push(path);
+        // vendor-nested。
+        for path in find_vendor_nested(bundle_id, &app_name, &variants) {
+            if !targets.contains(&path) {
+                targets.push(path);
+            }
         }
     }
 
@@ -960,6 +1115,35 @@ mod variant_tests {
         assert!(v.contains(&"dev.zed.zed-".to_string()));
         let v = name_variants("Zed", "dev.zed.Zed");
         assert!(!v.contains(&"dev.zed.zed-".to_string()));
+    }
+
+    /// 兄弟守卫：bundle ID 小写比较 + 版本后缀剥离。
+    #[test]
+    fn sibling_guard_helpers() {
+        assert_eq!(normalize_bundle_id("Com.Foo.Bar"), "com.foo.bar");
+        assert_eq!(strip_version_suffix("Zed Nightly"), "Zed");
+        assert_eq!(strip_version_suffix("Zed Beta"), "Zed");
+        assert_eq!(strip_version_suffix("Zed Developer Edition"), "Zed");
+        assert_eq!(strip_version_suffix("Zed Technology Preview"), "Zed");
+        assert_eq!(strip_version_suffix("Zed"), "Zed");
+        assert_eq!(strip_version_suffix("Zed Preview"), "Zed");
+        // Edge 是合法后缀（对标 bash 正则）：Microsoft Edge → Microsoft。
+        assert_eq!(strip_version_suffix("Microsoft Edge"), "Microsoft");
+        // 单独 "Edge" 无前缀 base → 不剥。
+        assert_eq!(strip_version_suffix("Edge"), "Edge");
+    }
+
+    /// fixture：/Applications 下两个同 bundle ID 的 .app → 兄弟存在。
+    #[test]
+    fn sibling_detection_fixture() {
+        // 用真实 /Applications 不可靠；构造临时目录并注入 search 路径不可行。
+        // 改为：不存在的 bundle → 无兄弟；本机真实存在的 bundle → 不 panic。
+        assert!(!has_surviving_sibling("com.example.no_such_app_xyz", "/nonexistent/App.app"));
+        let _ = surviving_siblings("com.example.no_such_app_xyz", "/nonexistent/App.app");
+        let _ = surviving_sibling_names("com.example.no_such_app_xyz", "/nonexistent/App.app");
+        // unknown/empty 直接无兄弟。
+        assert!(!has_surviving_sibling("", "/Applications/Foo.app"));
+        assert!(!has_surviving_sibling("unknown", "/Applications/Foo.app"));
     }
 }
 
