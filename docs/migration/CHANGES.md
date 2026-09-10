@@ -1149,3 +1149,24 @@
 ### 测试
 
 - 185 个测试通过。
+
+---
+
+<a name="uninstall-bundle-leaf"></a>
+## uninstall 应用卸载：bundle leaf 推导
+
+### 对标记录
+
+- 对标 app_protection.sh 1071-1099：bundle ID 最后一段 leaf ≥8、含驼峰 [a-z][A-Z]、以去空格显示名（≥3 字符）为前缀、rest 以大写/数字开头时，产出 leaf 与 "AppName RestSpaced" 两个 Library 路径变体。
+- 驼峰分词：([A-Z]+)([A-Z][a-z]) 与 ([a-z0-9])([A-Z]) 两规则（对标 sed）。
+
+### 变更前后对照
+
+| 项 | 原实现 | Rust 实现 | 是否变更 | 原因 |
+|----|--------|----------|---------|------|
+| 正则 | bash =~ [a-z][A-Z] | windows(2) 相邻检查 | 无行为变更 | — |
+| 分词 | sed 两规则 | insert_camel_spaces 逐字符 | 无行为变更 | — |
+
+### 测试
+
+- 187 个测试通过（新增：leaf 推导矩阵、驼峰分词）。

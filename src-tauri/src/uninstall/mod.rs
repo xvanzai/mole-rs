@@ -500,7 +500,99 @@ fn name_variants(app_name: &str, bundle_id: &str) -> Vec<String> {
     if is_reverse_dns_bundle_id(bundle_id) && bundle_id.starts_with("dev.zed.Zed-") {
         variants.push("dev.zed.zed-".to_string());
     }
+    // bundle leaf 推导（对标 app_protection.sh 1071-1099）：leaf ≥8、驼峰、
+    // 以去空格显示名开头且 rest 以大写/数字开头时，产出 leaf 与
+    // "AppName RestSpaced" 两个变体。
+    for leaf_var in bundle_leaf_variants(app_name, bundle_id) {
+        if !variants.contains(&leaf_var) {
+            variants.push(leaf_var);
+        }
+    }
     variants
+}
+
+/// 对标 bundle leaf 推导：返回应追加到 user_patterns 的变体名（小写）。
+fn bundle_leaf_variants(app_name: &str, bundle_id: &str) -> Vec<String> {
+    if !is_reverse_dns_bundle_id(bundle_id) || app_name.len() < 3 {
+        return Vec::new();
+    }
+    let Some(bundle_leaf) = bundle_id.rsplit('.').next() else {
+        return Vec::new();
+    };
+    let app_name_nospace: String = app_name.chars().filter(|c| *c != ' ').collect();
+    if bundle_leaf.len() < 8 || app_name_nospace.len() < 3 {
+        return Vec::new();
+    }
+    if bundle_leaf == app_name {
+        return Vec::new();
+    }
+    // 驼峰转换：存在 [a-z][A-Z] 相邻。
+    let has_camel = bundle_leaf.as_bytes().windows(2).any(|w| {
+        w[0].is_ascii_lowercase() && w[1].is_ascii_uppercase()
+    });
+    if !has_camel {
+        return Vec::new();
+    }
+    let leaf_lower = bundle_leaf.to_lowercase();
+    let name_lower = app_name_nospace.to_lowercase();
+    if !leaf_lower.starts_with(&name_lower) || leaf_lower == name_lower {
+        return Vec::new();
+    }
+    let rest = &bundle_leaf[name_lower.len()..];
+    let rest_first = rest.as_bytes().first().copied().unwrap_or(0);
+    if !(rest_first.is_ascii_uppercase() || rest_first.is_ascii_digit()) {
+        return Vec::new();
+    }
+    // rest 分词：([A-Z]+)([A-Z][a-z]) → 空格；([a-z0-9])([A-Z]) → 空格。
+    let rest_spaced = insert_camel_spaces(rest);
+    let mut out = vec![bundle_leaf.to_lowercase()];
+    let spaced = format!("{app_name} {rest_spaced}");
+    if spaced != app_name {
+        out.push(spaced.to_lowercase());
+    }
+    out
+}
+
+/// 对标 sed 's/([A-Z]+)([A-Z][a-z])/\1 \2/g; s/([a-z0-9])([A-Z])/\1 \2/g'。
+fn insert_camel_spaces(s: &str) -> String {
+    let bytes: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        // 规则 1：连续大写后接 大写+小写 → 在最后一个大写前插入空格。
+        if i + 2 < bytes.len()
+            && bytes[i].is_ascii_uppercase()
+            && bytes[i + 1].is_ascii_uppercase()
+            && bytes[i + 2].is_ascii_lowercase()
+        {
+            // 找到 AAA...BC 模式中最后一个大写 B 的位置。
+            let mut j = i;
+            while j < bytes.len() && bytes[j].is_ascii_uppercase() {
+                j += 1;
+            }
+            // j 是第一个非大写（或结尾）；在 j-1 前插空格。
+            for k in i..j - 1 {
+                out.push(bytes[k]);
+            }
+            out.push(' ');
+            out.push(bytes[j - 1]);
+            i = j;
+            continue;
+        }
+        // 规则 2：小写/数字 + 大写 → 插入空格。
+        if i > 0
+            && (bytes[i - 1].is_ascii_lowercase() || bytes[i - 1].is_ascii_digit())
+            && bytes[i].is_ascii_uppercase()
+        {
+            out.push(' ');
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
 }
 
 /// 名称模式集合（对标 user_patterns 的名称部分 + 变体 dotdirs + base 变体）。
@@ -1144,6 +1236,36 @@ mod variant_tests {
         // unknown/empty 直接无兄弟。
         assert!(!has_surviving_sibling("", "/Applications/Foo.app"));
         assert!(!has_surviving_sibling("unknown", "/Applications/Foo.app"));
+    }
+
+    /// bundle leaf 推导：有效/无效矩阵。
+    #[test]
+    fn bundle_leaf_derivation() {
+        // 有效：com.example.FooBarBaz + "Foo" → leaf=FooBarBaz ≥8、驼峰、
+        // 以 Foo 开头、rest=BarBaz 以 B 开头。
+        let v = bundle_leaf_variants("Foo", "com.example.FooBarBaz");
+        assert!(v.contains(&"foobarbaz".to_string()), "{v:?}");
+        assert!(v.contains(&"foo bar baz".to_string()), "{v:?}");
+
+        // 太短 leaf。
+        assert!(bundle_leaf_variants("Ab", "com.example.AbCd").is_empty());
+        // 显示名太短。
+        assert!(bundle_leaf_variants("A", "com.example.AbcDefgh").is_empty());
+        // 无驼峰（全小写）。
+        assert!(bundle_leaf_variants("Myapp", "com.example.myappcache").is_empty());
+        // leaf 不以显示名开头。
+        assert!(bundle_leaf_variants("Zed", "com.example.SomethingElse").is_empty());
+        // 非 reverse-DNS。
+        assert!(bundle_leaf_variants("FooBarBaz", "not-reverse-dns").is_empty());
+    }
+
+    /// 驼峰分词。
+    #[test]
+    fn camel_spacing() {
+        assert_eq!(insert_camel_spaces("BarBaz"), "Bar Baz");
+        assert_eq!(insert_camel_spaces("HTMLParser"), "HTML Parser");
+        assert_eq!(insert_camel_spaces("simple"), "simple");
+        assert_eq!(insert_camel_spaces("A1B2"), "A1 B2");
     }
 }
 
