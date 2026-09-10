@@ -39,6 +39,7 @@
 | clean_finder_metadata | mod scan_ds_store_tree | maxdepth 5+排除表 |
 | clean_trash | mod Trash execute | 直接清空 |
 | clean_orphaned_container_stubs | special.rs | CleanMyMac glob |
+| clean_orphaned_app_data | special.rs | 孤儿检测核心（简化） |
 | clean_cached_device_firmware | special.rs | *.ipsw |
 | clean_time_machine_failed_backups | special.rs | 计数报告（只读） |
 | check_large_file_candidates | special.rs | 13 路径审查（只读） |
@@ -54,7 +55,7 @@
 
 | 原函数 | 状态 | 原因 |
 |--------|------|------|
-| clean_orphaned_app_data | 暂缓 | 需 scan_installed_apps + 身份快照（~700 行）；孤儿检测语义复杂 |
+| clean_orphaned_app_data | ✅ 已迁移（简化） | 核心孤儿检测 1:1；无5分钟缓存；never_delete 表 28 前缀；无身份绑定；Claude VM 特例暂缓 |
 | clean_orphaned_system_services | 暂缓 | sudo 读取 LaunchDaemons + 大表保护模式（Sogou/ClashX/Docker 等） |
 | brew 活跃链接恢复 | 简化 | 依赖 sudo -u 注入；GUI 无 root 调用场景 |
 | clean_project_caches | 归 purge | 与 purge 共享 project.sh |
@@ -133,5 +134,7 @@
 
 **主体功能已 1:1 迁移。** 剩余项分三类：
 1. **CLI 安装/更新流**（installer/touchid/update/remove）：Tauri .app 分发架构差异，非功能缺失；
-2. **复杂孤儿检测**（orphaned_app_data/system_services）：需完整应用清单+身份绑定，独立子片；
+2. **orphaned_system_services**：sudo 读取 LaunchDaemons + 大表保护模式，独立子片；
 3. **TUI 专用形态**（live_scan 事件流、purge 进度文件）：GUI 已用等价交互覆盖。
+
+orphaned_app_data 已完成核心迁移（简化版）；Claude VM 特例、never_delete 完整表可后续补。
