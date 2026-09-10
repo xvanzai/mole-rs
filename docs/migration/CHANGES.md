@@ -1127,3 +1127,25 @@
 ### 测试
 
 - 185 个测试通过；真机冒烟 **424 组**（原 409）。
+
+---
+
+<a name="clean-jvm-xcode"></a>
+## clean 深度清理：Gradle 进程守卫 + Xcode 陈旧文档索引
+
+### 对标记录
+
+- `gradle_daemon_running` 三态：org.gradle.launcher.daemon / GradleDaemon；Running/Unknown 整组拒绝。
+- Gradle 四行：build-cache-*/*、notifications/*、daemon/*、workers/*（对标 clean_dev_jvm）。
+- `clean_xcode_documentation_cache`：DocumentationCache 下 DeveloperDocumentation*.index 按 mtime 保留最新，其余陈旧索引进程守卫后可删（对标 keep-newest）。
+
+### 变更前后对照
+
+| 项 | 原实现 | Rust 实现 | 是否变更 | 原因 |
+|----|--------|----------|---------|------|
+| Gradle 守卫 | _dev_safe_clean_process_guarded 双探针 | ScanEntry process_probe（扫描+sink） | 无行为变更 | 三态仅 Idle 放行 |
+| Xcode 索引 | 插入排序 + 逐项保护检查 | sort_by mtime + 进程守卫 | 无行为变更 | 保护在 skip_reason 扫描期覆盖 |
+
+### 测试
+
+- 185 个测试通过。

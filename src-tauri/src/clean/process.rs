@@ -137,6 +137,24 @@ pub fn tart_process_state() -> ProcessState {
     pgrep_any(&[("-x", "tart")])
 }
 
+/// Gradle 守护进程（对标 gradle_daemon_running）。
+pub fn gradle_daemon_state() -> ProcessState {
+    pgrep_any(&[
+        ("-f", "org.gradle.launcher.daemon"),
+        ("-f", "GradleDaemon"),
+    ])
+}
+
+/// Xcode 构建工具（对标 xcode_build_tooling_process_state 的简化）。
+pub fn xcode_process_state() -> ProcessState {
+    pgrep_any(&[
+        ("-x", "Xcode"),
+        ("-x", "xcodebuild"),
+        ("-x", "xcprebuild"),
+        ("-x", "com.apple.dt.XcodeBuildService"),
+    ])
+}
+
 /// pnpm（对标 pnpm_process_blocks_prune：Running/Unknown 均阻断 prune）。
 /// 匹配调用程序而非 argv 子串（pnpm-lock.yaml 不得永久阻断，#1370）。
 pub fn pnpm_process_state() -> ProcessState {

@@ -34,6 +34,8 @@ pub fn family_label(family: &str) -> &'static str {
         "dev_api" => "API 与调试",
         "dev_jetbrains" => "JetBrains",
         "dev_php" => "PHP 工具链",
+        "dev_jvm" => "JVM/Gradle",
+        "dev_xcode" => "Xcode",
         "browser" => "浏览器缓存",
         "browser_old_versions" => "浏览器旧版本",
         "apple_silicon" => "Apple Silicon 更新",

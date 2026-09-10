@@ -580,7 +580,90 @@ fn dynamic_entries() -> Vec<ScanEntry> {
     rows.extend(old_versions::edge_updater_old_version_entries());
 
     rows.extend(app_support_regenerable_entries());
+    rows.extend(gradle_guarded_entries());
+    rows.extend(xcode_documentation_stale_entries());
     rows
+}
+
+/// 对标 clean_xcode_documentation_cache：DocumentationCache 下
+/// DeveloperDocumentation*.index，保留 mtime 最新的一个，其余陈旧索引
+/// 进程守卫后可删。
+fn xcode_documentation_stale_entries() -> Vec<ScanEntry> {
+    let root = PathBuf::from("/Library/Developer/Xcode/DocumentationCache");
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    // 收集非符号链接的 *.index。
+    let mut indexes: Vec<(PathBuf, u64)> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    for e in entries.flatten() {
+        let Ok(ft) = e.file_type() else { continue };
+        if ft.is_symlink() {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy().to_string();
+        if name == "DeveloperDocumentation.index" || (name.starts_with("DeveloperDocumentation") && name.ends_with(".index")) {
+            let mtime = std::fs::metadata(e.path())
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            indexes.push((e.path(), mtime));
+        }
+    }
+    if indexes.len() <= 1 {
+        return Vec::new();
+    }
+    // 按 mtime 降序；除最新外均为陈旧。
+    indexes.sort_by(|a, b| b.1.cmp(&a.1));
+    let stale: Vec<PathBuf> = indexes.into_iter().skip(1).map(|(p, _)| p).collect();
+    // 陈旧项合成一个组（对标 stale_entries 数组）。
+    if stale.is_empty() {
+        return Vec::new();
+    }
+    // GUI 按 description 选组：用首个陈旧项路径作为 pattern，其余单独列出。
+    stale
+        .into_iter()
+        .map(|p| ScanEntry {
+            family: "dev_xcode",
+            pattern: p.clone(),
+            description: format!(
+                "Xcode stale doc index · {}",
+                p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+            ),
+            process_probe: Some(process::xcode_process_state),
+            sw_domain_guard: false,
+            age_days: 0,
+        })
+        .collect()
+}
+
+/// 对标 clean_dev_jvm 的 Gradle 进程守卫行（daemon 不可删，build-cache 等可删）。
+fn gradle_guarded_entries() -> Vec<ScanEntry> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let gradle = PathBuf::from(&home).join(".gradle");
+    if !gradle.is_dir() {
+        return Vec::new();
+    }
+    let rows: &[(&str, &str)] = &[
+        ("caches/build-cache-*/*", "Gradle build cache"),
+        ("notifications/*", "Gradle notifications cache"),
+        ("daemon/*", "Gradle daemon/workers"),
+        ("workers/*", "Gradle workers"),
+    ];
+    rows.iter()
+        .map(|(sub, desc)| ScanEntry {
+            family: "dev_jvm",
+            pattern: gradle.join(sub),
+            description: desc.to_string(),
+            process_probe: Some(process::gradle_daemon_state),
+            sw_domain_guard: false,
+            age_days: 0,
+        })
+        .collect()
 }
 
 /// 对标 clean_service_worker_cache 的 profile 遍历：Chrome/Arc/Brave/Dia/
