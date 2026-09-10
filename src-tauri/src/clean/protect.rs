@@ -22,6 +22,7 @@ use super::protect_data::{
     DATA_PROTECTED_BUNDLES, ENDPOINT_SECURITY_BUNDLE_PREFIXES, SYSTEM_CRITICAL_BUNDLES,
 };
 use super::whitelist::glob_match;
+use std::path::Path;
 
 /// Rust 侧额外加固前缀（对标 AGENTS.md "Never modify protected paths such as
 /// /System, /Library/Apple"；原实现靠目录设计保证不触碰，Rust 侧显式拦截）。
@@ -38,6 +39,13 @@ const HARD_PROTECTED_PREFIXES: &[&str] = &[
 
 fn home() -> String {
     std::env::var("HOME").unwrap_or_default()
+}
+
+/// 读取 .app 的 Contents/Info.plist（供 orphan 扫描使用）。
+pub(crate) fn read_info_dict_for_orphan(app: &Path) -> Option<plist::Dictionary> {
+    plist::Value::from_file(app.join("Contents/Info.plist"))
+        .ok()?
+        .into_dictionary()
 }
 
 /// 对标 `bundle_matches_pattern`：bash glob（大小写敏感、`*` 跨 `/`）。

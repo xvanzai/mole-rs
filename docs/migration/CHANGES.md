@@ -1314,3 +1314,28 @@
 ### 测试
 
 - 205 个测试通过。
+
+---
+
+<a name="clean-orphaned-app-data"></a>
+## clean 深度清理：orphaned app data
+
+### 对标记录
+
+- `clean_orphaned_app_data` 核心 1:1：
+  - `scan_installed_apps`：标准位置 .app 的 CFBundleIdentifier 集合；
+  - `is_bundle_orphaned`：should_protect_data → never_delete 模式 → installed → 系统组件 → 30 天 mtime → mdfind 回退；
+  - 资源类型：Caches/Logs（com.*/org.*/net.*/io.*）、Saved Application State（*.savedState）。
+
+### 变更前后对照
+
+| 项 | 原实现 | Rust 实现 | 是否变更 | 原因 |
+|----|--------|----------|---------|------|
+| 应用清单缓存 | 5 分钟磁盘缓存 + schema footer | 每次扫描（30s 预算） | **简化** | GUI 单次扫描成本可接受 |
+| never_delete 表 | ORPHAN_NEVER_DELETE_PATTERNS 完整表 | 28 个前缀模式 | **部分** | 覆盖主要敏感厂商；完整表可后续补 |
+| 身份绑定 | orphan_cleanup_candidate_snapshot | sink 复检 | **简化** | 同其他删除路径 |
+| Claude VM 特例 | is_claude_vm_bundle_orphaned | **未实现** | **暂缓** | 厂商特例独立小片 |
+
+### 测试
+
+- 205 个测试通过；真机冒烟 351 组（原 347）。

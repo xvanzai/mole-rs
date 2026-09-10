@@ -315,6 +315,204 @@ pub fn scan_external_volume(volume: &str) -> Vec<PathBuf> {
     out
 }
 
+/// 对标 ORPHAN_NEVER_DELETE_PATTERNS（敏感数据模式，小写匹配）。
+const ORPHAN_NEVER_DELETE: &[&str] = &[
+    "com.apple.*",
+    "com.microsoft.*",
+    "com.adobe.*",
+    "com.google.*",
+    "org.mozilla.*",
+    "net.*",
+    "io.*",
+    "com.slack.*",
+    "com.spotify.*",
+    "com.whatsapp.*",
+    "ru.keepcoder.*",
+    "com.tencent.*",
+    "com.alibaba.*",
+    "com.bytedance.*",
+    "com.zhiliaoapp.*",
+    "com.facebook.*",
+    "com.twitter.*",
+    "com.instagram.*",
+    "com.telegram.*",
+    "com.discord.*",
+    "com.notion.*",
+    "com.figma.*",
+    "com.linear.*",
+    "com.slack.*",
+];
+
+/// 对标 scan_installed_apps：扫描标准位置的 .app，提取 CFBundleIdentifier。
+/// 返回已安装 bundle ID 集合（小写）。
+pub fn scan_installed_bundle_ids() -> std::collections::HashSet<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let roots = [
+        "/Applications",
+        "/System/Applications",
+    ];
+    let home_roots = [
+        format!("{home}/Applications"),
+        format!("{home}/Library/Application Support/Setapp/Applications"),
+    ];
+    let mut ids = std::collections::HashSet::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut stack: Vec<(PathBuf, usize)> = roots
+        .iter()
+        .map(PathBuf::from)
+        .chain(home_roots.iter().map(PathBuf::from))
+        .filter(|p| p.is_dir())
+        .map(|p| (p, 0))
+        .collect();
+    while let Some((dir, depth)) = stack.pop() {
+        if Instant::now() >= deadline {
+            break;
+        }
+        if depth > 3 {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            if Instant::now() >= deadline {
+                break;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let path = entry.path();
+            if name.ends_with(".app") && path.is_dir() {
+                // 提取 CFBundleIdentifier。
+                if let Some(dict) = crate::clean::protect::read_info_dict_for_orphan(&path) {
+                    if let Some(id) = dict.get("CFBundleIdentifier").and_then(|v| v.as_string()) {
+                        ids.insert(id.to_lowercase());
+                    }
+                }
+                continue; // 不下钻 .app
+            }
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() && depth < 3 {
+                stack.push((path, depth + 1));
+            }
+        }
+    }
+    ids
+}
+
+/// 对标 is_bundle_orphaned 简化版：保护 → never_delete → installed → 系统组件
+/// → 30 天 mtime → mdfind。
+fn is_bundle_orphaned(bundle_id: &str, dir: &Path, installed: &std::collections::HashSet<String>) -> bool {
+    // 1. should_protect_data。
+    if protect::should_protect_data(bundle_id) {
+        return false;
+    }
+    // 2. never_delete 模式（小写 glob）。
+    let lower = bundle_id.to_lowercase();
+    if ORPHAN_NEVER_DELETE.iter().any(|p| glob_match(p, &lower)) {
+        return false;
+    }
+    // 3. 已安装。
+    if installed.contains(&lower) {
+        return false;
+    }
+    // 4. 硬编码系统组件。
+    if matches!(
+        lower.as_str(),
+        "loginwindow" | "dock" | "systempreferences" | "systemsettings" | "settings"
+            | "controlcenter" | "finder" | "safari"
+    ) {
+        return false;
+    }
+    // 5. 30 天 mtime。
+    if let Ok(meta) = std::fs::metadata(dir) {
+        if let Ok(modified) = meta.modified() {
+            if let Ok(age) = modified.elapsed() {
+                if age.as_secs() < 30 * 86400 {
+                    return false;
+                }
+            }
+        }
+    }
+    // 6. mdfind 回退。
+    if crate::uninstall::is_reverse_dns_bundle_id(bundle_id)
+        && crate::clean::command_exists("mdfind")
+    {
+        let query = format!("kMDItemCFBundleIdentifier == '{bundle_id}'");
+        if let Ok(out) = crate::status::run_cmd("mdfind", &[&query], Duration::from_secs(5)) {
+            if !out.trim().is_empty() {
+                return false;
+            }
+        }
+        // mdfind 失败/超时 → 保守视为非孤儿。
+    }
+    true
+}
+
+/// 对标 clean_orphaned_app_data 的核心：扫描 Caches/Logs/Saved Application State
+/// 下 com.*/org.*/net.*/io.* 或 *.savedState，检测孤儿并返回可清理列表。
+pub fn scan_orphaned_app_data() -> Vec<PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let installed = scan_installed_bundle_ids();
+    let whitelist = Whitelist::load();
+    let mut out = Vec::new();
+
+    // 三类资源 + 模式。
+    let resource_types: &[(&str, &str, &[&str])] = &[
+        ("Library/Caches", "Caches", &["com.*", "org.*", "net.*", "io.*"]),
+        ("Library/Logs", "Logs", &["com.*", "org.*", "net.*", "io.*"]),
+        ("Library/Saved Application State", "States", &["*.savedState"]),
+    ];
+    let deadline = Instant::now() + Duration::from_secs(30);
+    for (rel, _label, patterns) in resource_types {
+        let base = PathBuf::from(&home).join(rel);
+        if !base.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&base) else { continue };
+        for entry in entries.flatten() {
+            if Instant::now() >= deadline {
+                break;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let matches_pattern = patterns.iter().any(|p| {
+                if p.starts_with("*.") {
+                    name.ends_with(&p[1..])
+                } else if p.ends_with(".*") {
+                    name.starts_with(&p[..p.len() - 1])
+                } else {
+                    name == *p
+                }
+            });
+            if !matches_pattern {
+                continue;
+            }
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            // 提取 bundle_id（basename 去后缀）。
+            let bundle_id = name
+                .trim_end_matches(".savedState")
+                .trim_end_matches(".binarycookies")
+                .trim_end_matches(".plist")
+                .to_string();
+            if bundle_id.is_empty() {
+                continue;
+            }
+            // 最大迭代限制（对标 MOLE_MAX_ORPHAN_ITERATIONS）。
+            if out.len() >= 100 {
+                break;
+            }
+            if !is_bundle_orphaned(&bundle_id, &path, &installed) {
+                continue;
+            }
+            let path_str = path.to_string_lossy().to_string();
+            if protect::should_protect_path(&path_str) || whitelist.is_whitelisted(&path_str) {
+                continue;
+            }
+            out.push(path);
+        }
+    }
+    out
+}
+
 /// 对标 show_user_launch_agent_hint_notice：扫描 LaunchAgents 中程序目标
 /// 缺失/不可执行的条目（只读提示）。
 pub fn launch_agent_hints() -> Vec<(String, String)> {

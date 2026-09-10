@@ -1462,6 +1462,30 @@ pub fn scan_preview() -> CleanPreview {
         });
     }
 
+    // orphaned app data（对标 clean_orphaned_app_data）。
+    {
+        let orphans = special::scan_orphaned_app_data();
+        let size: u64 = orphans
+            .iter()
+            .map(|p| path_size_with_deadline(p, global_deadline.min(Instant::now() + SIZE_SCAN_DEADLINE)))
+            .sum();
+        let items: Vec<CleanItem> = orphans
+            .iter()
+            .map(|p| CleanItem {
+                path: p.to_string_lossy().to_string(),
+                size_bytes: 0,
+                skip_reason: String::new(),
+            })
+            .collect();
+        groups.push(CleanGroup {
+            description: "Orphaned app data".into(),
+            family: "app_leftovers".into(),
+            items,
+            total_size_bytes: size,
+            skipped_count: 0,
+        });
+    }
+
     // orphaned container stubs（对标 clean_orphaned_container_stubs）。
     {
         let stubs = special::scan_orphaned_container_stubs();
@@ -1922,6 +1946,31 @@ pub fn execute_clean(selected_groups: &[String], dry_run: bool) -> CleanExecuteR
             status: result.status,
             size_bytes: 0,
             detail,
+        });
+    }
+
+    // orphaned app data（对标 clean_orphaned_app_data）。
+    if selected_groups.iter().any(|s| s == "Orphaned app data") {
+        let orphans = special::scan_orphaned_app_data();
+        let mut removed = 0usize;
+        for p in &orphans {
+            let s = p.to_string_lossy().to_string();
+            let outcome = delete::delete_to_trash(&s, dry_run, "clean");
+            match outcome.status.as_str() {
+                "ok" | "dry-run" => removed += 1,
+                "failed" => failed_count += 1,
+                _ => {}
+            }
+            freed_bytes += outcome.size_bytes;
+        }
+        if !dry_run {
+            deleted_count += removed;
+        }
+        outcomes.push(DeleteOutcome {
+            path: "Orphaned app data".into(),
+            status: if dry_run { "dry-run" } else { "ok" }.into(),
+            size_bytes: 0,
+            detail: format!("已清理 {removed} 个孤儿数据目录"),
         });
     }
 
